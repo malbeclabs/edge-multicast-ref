@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use dz_edge_refdata::SYMBOL_LEN;
 
 use crate::state::{
-    is_venue_key, symbol_is_whole, unpadded, venue_key_field, Entry, RecordError, StateRecord,
-    VenueKeys, FIRST_INSTRUMENT_ID,
+    is_venue_key, symbol_is_whole, unpadded, venue_key_field, Entry, IdAllocation, RecordError,
+    StateRecord, VenueKeys, FIRST_INSTRUMENT_ID,
 };
 use crate::store::{StateError, StateStore};
 
@@ -94,6 +94,21 @@ pub enum SeedError {
     #[error("the record allocates derived Instrument IDs, and only a seed that resolves entries it holds can be written into it")]
     RecordIsDerived,
 
+    /// The record allocates IDs as `"derived"`, and the seed states its keys.
+    ///
+    /// No registry opens what that would write: `"derived"` derives from the
+    /// `Symbol`, which a stated key may change, so the combination is refused
+    /// at open as [`RefdataError::DerivedWithStatedVenueKeys`](crate::RefdataError::DerivedWithStatedVenueKeys),
+    /// and the record could no longer be read under the declaration it was
+    /// written under either. Refused here before anything is written, so the
+    /// record in the directory is left as it was. `"derived_key"` derives from
+    /// the key and takes a stated seed.
+    #[error(
+        "the record allocates derived Instrument IDs from the Symbol, and a seed with \
+         venue_keys = \"stated\" would write a record no registry opens; use \"derived_key\""
+    )]
+    DerivedWithStatedVenueKeys,
+
     /// The record is keyed under the other `venue_keys` declaration. Neither
     /// can be read as the other; see
     /// [`RefdataError::VenueKeysChanged`](crate::RefdataError::VenueKeysChanged).
@@ -172,6 +187,9 @@ fn merge(record: StateRecord, seed: &Seed) -> Result<StateRecord, SeedError> {
             persisted: record.source_id,
             seeded: seed.source_id,
         });
+    }
+    if record.allocation == IdAllocation::Derived && seed.venue_keys == VenueKeys::Stated {
+        return Err(SeedError::DerivedWithStatedVenueKeys);
     }
     if let Some(persisted) = record.keyed {
         if persisted != seed.venue_keys {

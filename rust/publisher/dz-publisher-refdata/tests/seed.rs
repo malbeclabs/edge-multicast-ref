@@ -727,3 +727,171 @@ fn a_seeded_stated_key_relisted_under_its_display_symbol_keeps_its_id_across_a_r
     reopened.seeding_complete();
     assert_eq!(id_of(&mut reopened, "DISPLAY", Some("venue-a")), Some(1));
 }
+
+// ---------------------------------------------------------------------------
+// Every seed that is accepted writes a record that opens
+// ---------------------------------------------------------------------------
+
+/// A keyed record written by a registry under `venue_keys` and
+/// `"derived_key"`, holding `K1` (displayed `AAA`).
+fn derived_key_record(venue_keys: VenueKeys) -> (Vec<u8>, u32) {
+    let store = MemoryStore::new();
+    let mut first = opened(
+        store.clone(),
+        config(Identity::VenueKey, venue_keys, IdAllocation::DerivedKey),
+    );
+    let key = (venue_keys == VenueKeys::Stated).then_some("K1");
+    let symbol = if key.is_some() { "AAA" } else { "K1" };
+    let id = id_of(&mut first, symbol, key).expect("admitted");
+    drop(first);
+    (store.record().expect("a record"), id)
+}
+
+#[test]
+fn a_stated_seed_into_a_derived_record_is_refused_and_the_record_left_as_it_was() {
+    let bytes = unkeyed_record(&["AAA", "BBB"], IdAllocation::Derived);
+    let floor = StateRecord::decode(&bytes)
+        .expect("a derived record")
+        .next_id;
+    let aaa = derive_instrument_id(&symbol_field("AAA").0);
+    let bbb = derive_instrument_id(&symbol_field("BBB").0);
+    let store = holding(&bytes);
+    let error = seed(
+        store.clone(),
+        &Seed {
+            venue_keys: VenueKeys::Stated,
+            ..a_seed(floor, &[("AAA", aaa), ("BBB", bbb)])
+        },
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, SeedError::DerivedWithStatedVenueKeys),
+        "{error}"
+    );
+    assert_eq!(
+        store.record().as_deref(),
+        Some(bytes.as_slice()),
+        "the record is byte for byte what it was"
+    );
+    // And it still opens under the configuration that wrote it.
+    opened(
+        store,
+        config(Identity::Symbol, VenueKeys::Symbol, IdAllocation::Derived),
+    );
+}
+
+#[test]
+fn a_stated_seed_into_a_derived_key_record_seeds_and_opens() {
+    let (bytes, id) = derived_key_record(VenueKeys::Stated);
+    let floor = StateRecord::decode(&bytes).expect("a keyed record").next_id;
+    let store = holding(&bytes);
+    seed(
+        store.clone(),
+        &Seed {
+            venue_keys: VenueKeys::Stated,
+            ..a_seed(floor, &[("K1", id)])
+        },
+    )
+    .expect("derived_key derives from the key, so stated keys are fine");
+    let mut registry = opened(
+        store,
+        config(
+            Identity::VenueKey,
+            VenueKeys::Stated,
+            IdAllocation::DerivedKey,
+        ),
+    );
+    assert_eq!(id_of(&mut registry, "AAA", Some("K1")), Some(id));
+}
+
+/// Every configuration a registry can be opened under.
+fn every_config() -> Vec<RegistryConfig> {
+    let mut out = Vec::new();
+    for identity in [Identity::Symbol, Identity::VenueKey] {
+        for venue_keys in [VenueKeys::Symbol, VenueKeys::Stated] {
+            for allocation in [
+                IdAllocation::Sequential,
+                IdAllocation::Derived,
+                IdAllocation::DerivedKey,
+            ] {
+                out.push(config(identity, venue_keys, allocation));
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn every_seed_that_is_accepted_writes_a_record_some_registry_opens() {
+    let aaa = derive_instrument_id(&symbol_field("AAA").0);
+    let bbb = derive_instrument_id(&symbol_field("BBB").0);
+    let derived = unkeyed_record(&["AAA", "BBB"], IdAllocation::Derived);
+    let derived_floor = StateRecord::decode(&derived).expect("derived").next_id;
+    let mut cases: Vec<(&str, Option<Vec<u8>>, Seed)> = Vec::new();
+    for venue_keys in [VenueKeys::Symbol, VenueKeys::Stated] {
+        cases.push((
+            "no record",
+            None,
+            Seed {
+                venue_keys,
+                ..a_seed(10, &[("AAA", 1), ("BBB", 2)])
+            },
+        ));
+        cases.push((
+            "an unkeyed sequential record",
+            Some(unkeyed_record(&["AAA", "BBB"], IdAllocation::Sequential)),
+            Seed {
+                venue_keys,
+                ..a_seed(3, &[("AAA", 1), ("BBB", 2)])
+            },
+        ));
+        cases.push((
+            "an unkeyed derived record",
+            Some(derived.clone()),
+            Seed {
+                venue_keys,
+                ..a_seed(derived_floor, &[("AAA", aaa), ("BBB", bbb)])
+            },
+        ));
+        for written in [VenueKeys::Symbol, VenueKeys::Stated] {
+            let (bytes, id) = derived_key_record(written);
+            let floor = StateRecord::decode(&bytes).expect("keyed").next_id;
+            cases.push((
+                "a keyed derived_key record",
+                Some(bytes),
+                Seed {
+                    venue_keys,
+                    ..a_seed(floor, &[("K1", id)])
+                },
+            ));
+        }
+    }
+    let mut accepted = 0;
+    for (what, bytes, a_seed) in cases {
+        let store = bytes.as_deref().map_or_else(MemoryStore::new, holding);
+        if seed(store.clone(), &a_seed).is_err() {
+            assert_eq!(
+                store.record(),
+                bytes,
+                "{what}, {a_seed:?}: a refused seed writes nothing"
+            );
+            continue;
+        }
+        accepted += 1;
+        let written = store.record().expect("a record");
+        let opens = every_config()
+            .into_iter()
+            .filter(|config| {
+                Registry::open(config.clone(), holding(&written), ManualClock::new()).is_ok()
+            })
+            .count();
+        assert!(
+            opens > 0,
+            "{what}, {a_seed:?}: the seed wrote a record no registry opens"
+        );
+    }
+    assert!(
+        accepted >= 6,
+        "the matrix exercises accepted seeds, {accepted}"
+    );
+}
