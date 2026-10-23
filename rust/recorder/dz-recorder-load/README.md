@@ -364,6 +364,15 @@ the feeds a few at a time. A loss shows as
 `dz_loader_objects_skipped_total{reason="evicted"}`, and the history it took is
 not recoverable.
 
+`reason="vanished"` is the same race one step earlier: a manifest gone between
+the walk listing it and the scan reading it. With no manifest there is no ledger
+key, so the scan cannot tell whether the object was loaded before it went. On a
+caught-up loader it almost always was — a steady trickle of `vanished` with
+`oldest_unloaded_age_seconds` near 0 is retention working, not loss. Read it as
+loss only beside a backlog whose oldest object is near the retention window.
+Neither is a `dz_loader_errors_total{kind="manifest"}`, which is kept for a
+manifest that is there and cannot be read.
+
 The loader never *waits* for a predecessor, though. Under a staging budget that
 evicts, the predecessor is routinely gone, and a loader that must see segment
 *n−1* before it can anchor segment *n* stalls on the first eviction. It writes
