@@ -70,6 +70,7 @@ fn every_quote_shape_lowers_the_same_before_and_after_the_encoding() {
             source_ts_ns: 1_700_000_000_000_000_000,
             bid,
             ask,
+            venue_update_id: None,
         };
         assert_eq!(
             lowered_directly(&[event]),
@@ -98,9 +99,17 @@ impl EventSink for Lowered {
                 source_ts_ns,
                 bid,
                 ask,
+                venue_update_id,
             } => {
                 let q = lowering
-                    .lower_quote(&self.instruments, instrument, source_ts_ns, bid, ask)
+                    .lower_quote(
+                        &self.instruments,
+                        instrument,
+                        source_ts_ns,
+                        bid,
+                        ask,
+                        venue_update_id,
+                    )
                     .expect("lowers");
                 let mut b = vec![0u8; dz_edge_tob::Quote::SIZE];
                 q.encode_into(&mut b);
@@ -234,6 +243,20 @@ fn every_event_variant_survives_the_encoding_intact() {
                 source_count: Some(3),
             },
             ask: SideUpdate::Gone,
+            venue_update_id: None,
+        },
+        // A quote carrying the venue's counter, which travels under its own
+        // record kind. Above 2^32, so the lowering narrows it on both runs.
+        Event::Quote {
+            instrument: handle(),
+            source_ts_ns: 1,
+            bid: SideUpdate::Gone,
+            ask: SideUpdate::Present {
+                px: Scalar::fixed(4_300, PRICE_EXPONENT),
+                qty: Scalar::fixed(700, QTY_EXPONENT),
+                source_count: None,
+            },
+            venue_update_id: Some((1 << 32) + 9),
         },
         Event::Trade {
             instrument: handle(),
@@ -313,6 +336,7 @@ fn every_event_variant_survives_the_encoding_intact() {
                 qty: Scalar::text("7"),
                 source_count: None,
             },
+            venue_update_id: None,
         },
     ];
 
@@ -442,6 +466,78 @@ fn a_record_split_across_payloads_is_truncated_and_not_silently_dropped() {
         .expect_err("the record declared more than it held");
     assert_eq!(error.as_str(), "truncated");
     assert_eq!(sink.events, 0);
+}
+
+#[test]
+fn a_quote_without_a_counter_is_written_as_it_always_was() {
+    // A quote with no counter keeps the original kind and body, so a stream
+    // from a venue that never states one is byte for byte what it was, and a
+    // writer in another language needs no change. A quote with one is the
+    // same record under its own kind, with the counter after the body.
+    let quote = |venue_update_id| Event::Quote {
+        instrument: handle(),
+        source_ts_ns: 1,
+        bid: SideUpdate::Gone,
+        ask: SideUpdate::Gone,
+        venue_update_id,
+    };
+    let mut writer = RecordWriter::new();
+    let (mut without, mut with) = (Vec::new(), Vec::new());
+    writer
+        .write(SYMBOL, &quote(None), &mut without)
+        .expect("a quote is covered");
+    writer
+        .write(SYMBOL, &quote(Some(0x0102_0304_0506_0708)), &mut with)
+        .expect("a quote is covered");
+
+    assert_eq!(without[5], 1, "the original quote kind");
+    assert_eq!(with[5], 5, "the quote kind that carries a counter");
+    assert_eq!(with.len(), without.len() + 8);
+    let declared = |r: &[u8]| u32::from_le_bytes(r[..4].try_into().unwrap()) as usize;
+    assert_eq!(declared(&with), declared(&without) + 8);
+    assert_eq!(with[4], without[4], "one version for both");
+    assert_eq!(with[6..without.len()], without[6..]);
+    assert_eq!(
+        with[without.len()..],
+        0x0102_0304_0506_0708u64.to_le_bytes()
+    );
+
+    for (record, want) in [(&without, None), (&with, Some(0x0102_0304_0506_0708))] {
+        let Some(Event::Quote {
+            venue_update_id, ..
+        }) = decode(record, |_| Some(handle())).expect("readable")
+        else {
+            panic!("expected a quote");
+        };
+        assert_eq!(venue_update_id, want);
+    }
+}
+
+#[test]
+fn a_quote_with_a_counter_cut_short_is_truncated() {
+    let mut record = Vec::new();
+    RecordWriter::new()
+        .write(
+            SYMBOL,
+            &Event::Quote {
+                instrument: handle(),
+                source_ts_ns: 1,
+                bid: SideUpdate::Gone,
+                ask: SideUpdate::Gone,
+                venue_update_id: Some(7),
+            },
+            &mut record,
+        )
+        .expect("a quote is covered");
+    // Drop the counter's last byte, and say so in the length, so the body
+    // ends inside the counter rather than the buffer ending inside the body.
+    record.pop();
+    let declared = u32::from_le_bytes(record[..4].try_into().unwrap()) - 1;
+    record[..4].copy_from_slice(&declared.to_le_bytes());
+    assert_eq!(
+        decode(&record, |_| Some(handle())),
+        Err(RecordError::Truncated)
+    );
 }
 
 #[test]

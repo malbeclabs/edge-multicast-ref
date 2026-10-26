@@ -19,8 +19,8 @@ use dz_adapter_core::{
 };
 use dz_publisher_lowering::SourceId;
 use dz_publisher_refdata::{
-    CycleSchedule, ManualClock, MemoryStore, RefdataError, Refusal, Registry, RegistryConfig,
-    SelectionPolicy, ShardConfig, StateRecord,
+    CycleSchedule, IdAllocation, ManualClock, MemoryStore, RefdataError, Refusal, Registry,
+    RegistryConfig, SelectionPolicy, ShardConfig, StateRecord,
 };
 
 /// Two shards of one publisher, named the way a venue names a partition it
@@ -54,6 +54,7 @@ fn config(shards: Vec<ShardConfig>) -> RegistryConfig {
         selection: SelectionPolicy::from_seed(8).expect("8 is a seed"),
         schedule: CycleSchedule::new(Duration::from_secs(30), 1232, 8),
         forget_delisted_after: None,
+        id_allocation: IdAllocation::Sequential,
     }
 }
 
@@ -96,7 +97,10 @@ fn lapped(
     for _ in 0..30 {
         clock.advance(Duration::from_secs(1));
         registry.definition_tick(shard, &mut out);
-        seen.extend(out.iter().map(|definition| definition.instrument_id));
+        seen.extend(
+            out.iter()
+                .map(|definition| definition.definition.instrument_id),
+        );
     }
     seen.sort_unstable();
     seen.dedup();

@@ -121,6 +121,45 @@ pub enum Refusal {
     #[error("a different shard was named for a published instrument")]
     ShardRestated,
 
+    /// A stated strike cannot be carried: a bound that is not a decimal or does
+    /// not fit, or a fixed strike with neither bound.
+    ///
+    /// The strike the instrument publishes is unchanged. An instrument with
+    /// no strike yet, whose first definition has not gone out, is given a
+    /// pending one: the venue has said the contract pays on a strike, and the
+    /// supplement requires one from the first definition. Published bare, it
+    /// would read as a contract that pays on no strike, and the valid strike
+    /// the venue states a poll later would be refused as
+    /// [`StrikePresence`](Self::StrikePresence). A strike that stays pending is
+    /// what `Registry::strikes_pending_on` shows.
+    #[error("the stated strike cannot be represented")]
+    StrikeUnrepresentable,
+
+    /// A stated strike is an interval no value is inside: a lower bound above
+    /// the upper one, or equal bounds with an exclusive end. The contract could
+    /// never pay, so the statement is refused rather than published.
+    #[error("the stated strike is an empty interval")]
+    StrikeEmpty,
+
+    /// A strike that was published as fixed was restated as pending.
+    ///
+    /// The supplement forbids it: after a fixed `StrikeInterval`, each later
+    /// one for the instrument in the era is fixed. The published strike stands.
+    /// A venue that has genuinely withdrawn a strike has ended the contract it
+    /// defined, which is a delisting.
+    #[error("a fixed strike was restated as pending")]
+    StrikeUnfixed,
+
+    /// A strike was stated for an instrument already published without one.
+    ///
+    /// Whether an instrument has a strike is read off the datagram that carries
+    /// its definition, from the first one, and a subscriber that joined then
+    /// has it as a contract that pays on no strike. So presence is fixed by
+    /// what the first definition carried. The other direction cannot be stated
+    /// at all: nothing withdraws a strike.
+    #[error("a strike was stated for an instrument already published without one")]
+    StrikePresence,
+
     /// The `Instrument ID` space is exhausted.
     ///
     /// Unreachable in practice and refused rather than wrapped: the next ID
@@ -129,6 +168,25 @@ pub enum Refusal {
     /// than declining a listing.
     #[error("the Instrument ID space is exhausted")]
     IdSpaceExhausted,
+
+    /// Under [`IdAllocation::Derived`](crate::IdAllocation::Derived), the ID
+    /// this symbol derives is `0`, below the record's floor, or held by another
+    /// symbol.
+    ///
+    /// **Declined, never moved.** The instrument holding the ID keeps it, and
+    /// nothing probes to a free neighbour: which neighbour is free depends on
+    /// what this publisher admitted first, and that is exactly how two
+    /// publishers of one channel would come to disagree. Declining is not
+    /// order-free either: the holder is whichever symbol was admitted first,
+    /// so two publishers that admit a colliding pair in opposite orders hold
+    /// the ID under different symbols. No rule that keeps a published ID
+    /// resolvable avoids that, so it is reported rather than prevented. Not
+    /// ordinary — a
+    /// collision is rare enough to be worth a line, and
+    /// [`Registry::take_unavailable_ids`](crate::Registry::take_unavailable_ids)
+    /// names the symbol that holds the ID.
+    #[error("the Instrument ID this symbol derives is unavailable")]
+    IdUnavailable,
 
     /// The persisted state could not be written, so no further ID is minted.
     ///

@@ -170,6 +170,7 @@ fn a_quote_for_a_per_contract_instrument_reaches_the_wire_in_underlying_units() 
                 qty: Scalar::fixed(200, -2),
                 source_count: None,
             },
+            None,
         )
         .expect("the contract divides both prices");
 

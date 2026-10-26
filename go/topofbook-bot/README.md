@@ -16,6 +16,8 @@ topofbook-parser  ──unix socket JSONL──▶  topofbook-bot  ──/metric
 - Tracks per-symbol bid/ask price and size, spread, and last trade
 - Emits a `dz_bot_*` Prometheus scrape endpoint
 
+A `strike_interval` record (the strike of a contract that pays on a threshold or a range, which the parser emits directly behind the instrument's definition) is counted in `records_total{type="strike_interval"}` and passes the `--symbol` filter like any record that carries a symbol. The book-builder keeps no definitions, so it holds no strike, and writes none to ClickHouse.
+
 The book-builder is single-host, single-process, and does no persistence. Historical storage, complex strategies, risk — all out of scope. This is the smallest interesting consumer.
 
 ## Quick start

@@ -45,6 +45,10 @@ tokio = { version = "1", default-features = false, features = [
     "time",
     "signal",
     "macros",
+    # The threaded input model: connection tasks on a worker pool, and the
+    # bounded queue from them to the publisher loop.
+    "rt-multi-thread",
+    "sync",
 ] }
 
 [dev-dependencies]

@@ -68,7 +68,26 @@ pub const DEFAULT_INSERT_MAX_DELAY: Duration = Duration::from_secs(15 * 60);
 /// says; the row bounds above are what govern merge pressure.
 pub const DEFAULT_INSERT_MAX_BYTES: u64 = 256 * 1024 * 1024;
 
-/// The default number of attempts one batch is given./// The default number of attempts one batch is given.
+/// How many inserts of one grain are in flight at once, by default: one.
+///
+/// A column store parses a `JSONEachRow` body on the threads its settings
+/// profile allows the account, and the loader's account is bounded on purpose.
+/// One request at a time therefore loads at the rate one such request is
+/// parsed, whatever the network and this host could carry — and on a busy
+/// recorder that is about the rate the recorder produces rows, so a loader that
+/// falls behind never catches up. Sending several bodies of the same grain at
+/// once is the only lever on this side. It costs the destination that many
+/// concurrent inserts, which is why it is a setting and why the default leaves
+/// the behaviour as it was.
+pub const DEFAULT_INSERT_CONCURRENCY: usize = 1;
+
+/// The most inserts a configuration may ask for at once.
+///
+/// A bound rather than a recommendation: past it the loader is a load test of
+/// somebody else's cluster.
+pub const MAX_INSERT_CONCURRENCY: usize = 8;
+
+/// The default number of attempts one batch is given.
 ///
 /// Bounded, because the loader's answer to a destination that will not take a
 /// batch is to leave the object unloaded and come back to it — and an unbounded
@@ -102,6 +121,12 @@ pub enum ConfigError {
     FloorAboveCap { min: usize, max: usize },
     #[error("[clickhouse] attempts must be at least 1: a batch nobody tries never lands")]
     NoAttempts,
+    #[error(
+        "[clickhouse] insert_concurrency is {0}, and must be between 1 and {max}: one insert \
+         at a time is the floor, and more than {max} is a load test of the destination",
+        max = MAX_INSERT_CONCURRENCY
+    )]
+    ConcurrencyOutOfRange(usize),
 }
 
 /// Where the rows go, and how they are batched on the way.
@@ -127,6 +152,9 @@ pub struct ClickHouseConfig {
     pub insert_max_bytes: u64,
     /// Attempts per batch, including the first.
     pub attempts: u32,
+    /// Inserts of one grain in flight at once. See
+    /// [`DEFAULT_INSERT_CONCURRENCY`].
+    pub insert_concurrency: usize,
     #[serde(with = "duration_secs")]
     pub timeout: Duration,
 }
@@ -142,6 +170,7 @@ impl Default for ClickHouseConfig {
             insert_max_delay: DEFAULT_INSERT_MAX_DELAY,
             insert_max_bytes: DEFAULT_INSERT_MAX_BYTES,
             attempts: DEFAULT_ATTEMPTS,
+            insert_concurrency: DEFAULT_INSERT_CONCURRENCY,
             timeout: Duration::from_secs(30),
         }
     }
@@ -182,6 +211,9 @@ impl ClickHouseConfig {
         }
         if self.attempts == 0 {
             return Err(ConfigError::NoAttempts);
+        }
+        if self.insert_concurrency == 0 || self.insert_concurrency > MAX_INSERT_CONCURRENCY {
+            return Err(ConfigError::ConcurrencyOutOfRange(self.insert_concurrency));
         }
         Ok(())
     }
@@ -487,6 +519,25 @@ mod tests {
                 "`{forbidden}` appears in the configuration: {text}"
             );
         }
+    }
+
+    /// One insert at a time unless a configuration says otherwise, and a
+    /// configuration cannot say nothing at all or ask for a load test.
+    #[test]
+    fn insert_concurrency_defaults_to_one_and_is_bounded() {
+        assert_eq!(ClickHouseConfig::default().insert_concurrency, 1);
+        let mut config = valid();
+        config.insert_concurrency = 0;
+        assert_eq!(config.check(), Err(ConfigError::ConcurrencyOutOfRange(0)));
+        config.insert_concurrency = MAX_INSERT_CONCURRENCY;
+        assert_eq!(config.check(), Ok(()));
+        config.insert_concurrency = MAX_INSERT_CONCURRENCY + 1;
+        assert_eq!(
+            config.check(),
+            Err(ConfigError::ConcurrencyOutOfRange(
+                MAX_INSERT_CONCURRENCY + 1
+            ))
+        );
     }
 
     #[test]

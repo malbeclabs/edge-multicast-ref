@@ -4022,6 +4022,10 @@ fn the_read_extraction_sees_a_join_and_not_only_a_from() {
 
 /// `012` grants nothing to either of Lake's accounts, and argues why.
 ///
+/// `lake_api` does hold two transport-grain grants for a Go handler
+/// (`malbeclabs/infra#3245`), recorded with that account in infra and named in
+/// `012`'s prose; what stays out of this file is any statement naming it.
+///
 /// The grant was written and reverted, so the absence is a decision and the
 /// paragraph beside it is the decision's record. Two halves, and each fails
 /// differently if it goes missing. `lake_api` is the connection Lake's own Go
@@ -4088,8 +4092,12 @@ fn the_reader_file_grants_nothing_to_lake_and_says_why() {
     );
 }
 
-/// `012` records the three grants the live cluster holds and the statements
+/// `012` records the three grants the live cluster held and the statements
 /// that remove them.
+///
+/// They were probably dropped when `lake_api` was recreated on 2026-10-06, but
+/// that is inferred, not checked, so the record stays until an administrator's
+/// `SHOW GRANTS` retires it.
 ///
 /// Re-applying this file replays a grant and revokes nothing, so the block of
 /// `GRANT`s is not the state of Lake's access on the cluster where the reverted

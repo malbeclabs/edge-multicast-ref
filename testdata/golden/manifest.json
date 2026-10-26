@@ -1,5 +1,5 @@
 {
-  "spec_revision": "edge-feed-spec 3a8f19c615aa9270e8581a22d45c6a9e780fee66 (2026-08-23); top-of-book 3.0.1; reference-data 1.0.2; market-by-price 1.0.0",
+  "spec_revision": "edge-feed-spec 3a8f19c615aa9270e8581a22d45c6a9e780fee66 (2026-08-23); top-of-book 3.0.1; reference-data 1.0.2; market-by-price 1.0.0. strike-interval-v3.bin: edge-feed-spec 4bf2e03f3b1b883695727bd73300d7a1271e59bd; reference-data 1.1.0",
   "vectors": [
     {
       "file": "quote-v3.bin",
@@ -105,6 +105,23 @@
         "manifest_seq": 9,
         "instrument_count": 1234,
         "timestamp_ns": 1700000000000000002
+      },
+      "flags_on_wire": 0
+    },
+    {
+      "file": "strike-interval-v3.bin",
+      "message": "StrikeInterval",
+      "type_id": "0x09",
+      "size": 40,
+      "schema_version": 3,
+      "fields": {
+        "instrument_id": 1,
+        "source_id": 2,
+        "strike_exponent": -2,
+        "bound_flags": 7,
+        "lower_bound": 9270000,
+        "upper_bound": 9279999,
+        "fixing_time_ns": 1700000000000000003
       },
       "flags_on_wire": 0
     },

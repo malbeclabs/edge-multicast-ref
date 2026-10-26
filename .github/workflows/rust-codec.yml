@@ -26,14 +26,17 @@ jobs:
       run:
         working-directory: rust
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       # Before the toolchain, because it needs none and a breach here is cheaper
       # to learn about in ten seconds than after a build.
       - name: Public-repository rules
         working-directory: .
         run: ./scripts/check-public-repo-rules.sh
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
         with:
+          toolchain: stable
           components: clippy, rustfmt
       - name: Format
         run: cargo fmt --all -- --check
@@ -74,9 +77,12 @@ jobs:
       run:
         working-directory: rust
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+        with:
+          toolchain: stable
           components: clippy
       - name: Install libpcap
         run: sudo apt-get update && sudo apt-get install -y libpcap-dev
@@ -127,11 +133,14 @@ jobs:
   e2e:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Can this runner deliver multicast to itself?
         run: ./scripts/probe-loopback-multicast.py
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
         with:
+          toolchain: stable
           components: clippy
       - name: Clippy (socket-e2e)
         working-directory: rust
@@ -182,9 +191,12 @@ jobs:
           --health-timeout 3s
           --health-retries 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+        with:
+          toolchain: stable
           components: clippy
       # Before the tests, because a health check that passed while the server
       # was still loading its own databases produces a first failure nobody can
@@ -245,16 +257,29 @@ jobs:
       # them change what the rule set judges — #64 (an overflowed delta journal
       # stays unverifiable), #66 (both ends of an MBP snapshot rotation) and #70
       # (schema 1 and schema 3 in one binary) — and a conformance failure that
-      # first appears at this pin may be theirs rather than this repository's.
-      SPEC_REF: 931d68d9a5d2446c56cdbf644acd518ed91beafa
+      # first appeared at that pin may be theirs rather than this repository's.
+      #
+      # Pinned now at 57f2bd3 (upstream #84), upstream's head when the second
+      # floor arrived: the five `STRIKE.*` rules exist from 4bf2e03 (upstream
+      # #93), and an older rule set skips a `StrikeInterval` as a type it does
+      # not know, which `strike_conformance.rs` fails on rather than reading as
+      # five passes. The move from 931d68d carries six commits. Three change
+      # what the rule set judges or reports — #51 (`REFDATA.NEVER_REACHES_READY`
+      # decided when the window closes), #93 (the strike rules) and #84 (a
+      # finding names the publisher it judges) — and the other three are
+      # registry and specification text.
+      SPEC_REF: 57f2bd3f83f9d694b7649af5e96b2cad0eda6864
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: malbeclabs/edge-feed-spec
           ref: ${{ env.SPEC_REF }}
           path: edge-feed-spec
-      - uses: actions/setup-go@v5
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: edge-feed-spec/tools/conformance/go.mod
       # Stamped, because an unstamped build answers `dev+none` from `--version`
@@ -275,8 +300,9 @@ jobs:
             -ldflags "-X main.version=${SPEC_REF} -X main.commit=${SPEC_REF}" \
             -o "$RUNNER_TEMP/dz-conformance" .
           "$RUNNER_TEMP/dz-conformance" --version
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
         with:
+          toolchain: stable
           components: clippy
       - name: Clippy (conformance)
         working-directory: rust

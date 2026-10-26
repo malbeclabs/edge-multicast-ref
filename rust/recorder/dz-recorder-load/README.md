@@ -128,6 +128,34 @@ store's password comes from a systemd credential
 (`DZ_LOADER_CLICKHOUSE_PASSWORD_FILE`) or, second best, from
 `DZ_LOADER_CLICKHOUSE_PASSWORD`.
 
+## What goes on the wire
+
+**Every insert body is zstd, sent under `Content-Encoding: zstd`, and
+consecutive bodies share a connection.** A column store decompresses a request
+body by that header, so there is nothing to configure on either side. The
+compression is not there to save bandwidth. Uncompressed, a recorder a long
+round trip from the store could send one body at the rate the path allowed and
+no faster, which was slower than it recorded: it fell behind and stayed behind,
+and the recorder evicts by staging budget whether or not an object was loaded.
+Compressed, the same rows are several times fewer bytes on that path. The
+connection is kept for the same reason: a handshake and a slow start per body
+cost the most where the round trip is longest.
+
+`dz_loader_bytes_written_total` still counts the rows as serialized, not the
+bytes after compression, so it stays comparable across versions.
+
+**`insert_concurrency` sends several bodies of one grain at once, and the
+default is one.** Compression took the network out of the way and showed what
+was behind it: the destination parses a body on the threads its settings profile
+allows the loader's account, so one request at a time loads at the rate one
+request is parsed. Measured on recorders taking 30,000 to 40,000 datagrams a
+second, that was about the rate they recorded, with the host a quarter busy and
+the path nearly idle, so a loader that had fallen behind stayed behind. With
+`insert_concurrency = 3` up to three bodies of the same grain are in flight, each
+on its own connection. Grains are still sent in order, base before derived, and
+a refusal still fails every object in the batch. It is bounded at 8, and each
+request in flight is a concurrent insert on a cluster somebody else also uses.
+
 ## Two things to do at provisioning, neither of them in this crate
 
 **Build with `--features tls` if the destination is `https://`.** TLS is off by
@@ -286,7 +314,7 @@ Two consequences follow, and both look wrong until the above is in mind:
   whose datagram rows are present and whose gap rows are not — and that object
   reads as a clean feed for ever. Partial credit is how a gap becomes invisible.
 
-## Oldest object first
+## Oldest object first, per feed
 
 Not a preference. Two reasons, pointing the same way:
 
@@ -296,6 +324,54 @@ Not a preference. Two reasons, pointing the same way:
   segment. In order, every boundary after the first is certain; out of order,
   the first object of every run writes an uncertain anchor and every gap inside
   it is reported `unverifiable`.
+
+**Oldest first within each feed, and the feeds take turns.** Both reasons are
+about one feed's objects — the preceding segment is the same feed's, and the
+trailer the check consults is keyed on the feed — so a pass takes every feed's
+oldest waiting object, then every feed's second, and so on, oldest first within
+each round. One global queue was the alternative, and it let a newly scanned
+feed stop every other one: adding a feed to `[loader] feeds` brings its whole
+archive, up to its share of the staging budget, and every object of it is older
+than anything the feeds already loading have published since. Those feeds then
+derived nothing until the back-load drained, which for a consumer that settles a
+window a few hours after it closes is not a delay but a window written short for
+good. Taking turns, a feed that is keeping up — a few objects since the last
+pass — is derived in full within the first few rounds of the pass whatever the
+others have waiting (at `max_objects_per_pass = 60` and fifteen feeds, any feed
+publishing four objects a pass or fewer), and a back-load drains at its share of
+the pass instead of all of it.
+
+What that gives up is global oldest first, and only while a bounded pass has
+more than one feed behind: the globally oldest object may wait a pass longer.
+Nothing about the lag gauges changes — they measure what is waiting, not the
+order it is taken in — so a back-load still shows in
+`dz_loader_oldest_unloaded_age_seconds` until it drains.
+
+**A back-load can still lose its oldest objects, and taking turns does not
+change how many in total.** The pass bound is shared: with several feeds added
+at once, each drains at its share of what the caught-up feeds leave, so N
+newcomers together drain at the rate one newcomer would alone. Only a feed at
+its staging share evicts at all — a quiet feed under its share keeps its archive
+until it is loaded — and what eviction takes from a busy one is whatever of its
+archive is older than its retention less its time in line. One global queue
+spent the pass on the oldest objects anywhere, which are the quiet feeds', while
+the busy feeds at their share evicted; taking turns gives those a share from the
+first pass. Before adding feeds, compare the expected drain time — objects
+waiting over (`max_objects_per_pass` less what the caught-up feeds publish per
+pass), times the pass period — against the busiest newcomer's retention at its
+share. If it does not fit, raise `max_objects_per_pass` for the back-load, or add
+the feeds a few at a time. A loss shows as
+`dz_loader_objects_skipped_total{reason="evicted"}`, and the history it took is
+not recoverable.
+
+`reason="vanished"` is the same race one step earlier: a manifest gone between
+the walk listing it and the scan reading it. With no manifest there is no ledger
+key, so the scan cannot tell whether the object was loaded before it went. On a
+caught-up loader it almost always was — a steady trickle of `vanished` with
+`oldest_unloaded_age_seconds` near 0 is retention working, not loss. Read it as
+loss only beside a backlog whose oldest object is near the retention window.
+Neither is a `dz_loader_errors_total{kind="manifest"}`, which is kept for a
+manifest that is there and cannot be read.
 
 The loader never *waits* for a predecessor, though. Under a staging budget that
 evicts, the predecessor is routinely gone, and a loader that must see segment

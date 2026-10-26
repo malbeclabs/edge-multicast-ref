@@ -39,6 +39,7 @@ fn quote(ts: u64) -> Msg {
         ask_qty: 7,
         bid_source_count: 0,
         ask_source_count: 0,
+        venue_update_id: 0,
     })
 }
 

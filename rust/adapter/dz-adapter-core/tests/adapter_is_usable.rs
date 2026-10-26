@@ -218,6 +218,7 @@ impl Adapter for LineAdapter {
                             source_count: None,
                         }
                     },
+                    venue_update_id: None,
                 });
                 Ok(())
             }

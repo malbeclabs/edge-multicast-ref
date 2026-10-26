@@ -330,6 +330,7 @@ impl FixtureAdapter {
                     source_ts_ns: payload.recv_ts_ns.saturating_sub(1_000),
                     bid,
                     ask,
+                    venue_update_id: None,
                 });
             }
             "level" => {
@@ -434,6 +435,7 @@ impl FixtureAdapter {
                         qty: Scalar::text("1"),
                         source_count: None,
                     },
+                    venue_update_id: None,
                 });
             }
             // **A handle no poll minted**, which is the one thing this fixture
@@ -466,6 +468,7 @@ impl FixtureAdapter {
                             qty: Scalar::text("1"),
                             source_count: None,
                         },
+                        venue_update_id: None,
                     }),
                     "level" => out.event(Event::Level {
                         instrument,

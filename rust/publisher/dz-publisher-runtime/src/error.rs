@@ -559,6 +559,16 @@ pub enum StartupError {
     #[error("`{key}` must be at least one second")]
     DurationUnderASecond { key: &'static str },
 
+    /// `[refdata] id_allocation = "derived"` together with
+    /// `forget_delisted_after`.
+    ///
+    /// Two publishers of one channel forget about one poll apart, so a symbol
+    /// relisted near the horizon would come back under the record's ID on one
+    /// and under a fresh derivation on the other. Derived allocation keeps
+    /// every entry for good, which is what this key would undo.
+    #[error("`[refdata] id_allocation = \"derived\"` forgets nothing, so `[refdata] forget_delisted_after` cannot be set with it")]
+    ForgettingUnderDerivedIds,
+
     /// `[egress] ttl` is not stated, and it has no default.
     ///
     /// # Why the key is stated rather than defaulted
@@ -688,6 +698,18 @@ pub enum StartupError {
         #[source]
         source: io::Error,
     },
+
+    /// `[ingress] decode_threads` is set, and the venue decodes inline.
+    ///
+    /// Refused rather than read past. The key sizes the threads the threaded
+    /// input model decodes on, and a venue composed with `Venue::new` has none:
+    /// left in place, it reads as a publisher using more cores than it is.
+    #[error(
+        "`[ingress] decode_threads` is set to {threads}, and this venue's adapter decodes \
+         inline on the publisher loop, so the key would change nothing: remove it, or compose \
+         the venue with `Venue::threaded`"
+    )]
+    DecodeThreadsInline { threads: usize },
 
     /// No configuration file was named.
     #[error("no configuration file: {usage}")]

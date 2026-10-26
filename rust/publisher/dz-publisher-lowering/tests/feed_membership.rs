@@ -36,6 +36,7 @@ fn quote() -> Quote {
         ask_qty: 700,
         bid_source_count: 0,
         ask_source_count: 0,
+        venue_update_id: 0,
     }
 }
 
@@ -183,20 +184,21 @@ fn each_feeds_table_is_the_one_its_specification_states() {
     // fails when either side moves.
     //
     // Top-of-book: 0x01 Heartbeat, 0x02 InstrumentDefinition, 0x03 Quote,
-    // 0x04 Trade, 0x06 EndOfSession, 0x07 ManifestSummary, 0x08 Liquidation.
-    // The table steps over 0x05.
+    // 0x04 Trade, 0x06 EndOfSession, 0x07 ManifestSummary, 0x08 Liquidation,
+    // 0x09 StrikeInterval. The table steps over 0x05.
     assert_eq!(
         <TopOfBook as Feed>::CARRIES,
-        &[0x01, 0x02, 0x03, 0x04, 0x06, 0x07, 0x08]
+        &[0x01, 0x02, 0x03, 0x04, 0x06, 0x07, 0x08, 0x09]
     );
 
-    // Market-by-price: the same inherited five, plus Liquidation, the two
+    // Market-by-price: the same inherited five, plus Liquidation and
+    // StrikeInterval, the two
     // shared with the market-by-order feed at its own numbers, the two snapshot
     // bookends, and this feed's own three. 0x03 and 0x05 are reserved and
     // absent - 0x03 explicitly, to stop the cross-decoding this file tests.
     assert_eq!(
         <MarketByPrice as Feed>::CARRIES,
-        &[0x01, 0x02, 0x04, 0x06, 0x07, 0x08, 0x13, 0x14, 0x20, 0x22, 0x40, 0x41, 0x42]
+        &[0x01, 0x02, 0x04, 0x06, 0x07, 0x08, 0x09, 0x13, 0x14, 0x20, 0x22, 0x40, 0x41, 0x42]
     );
 
     // And every type this workspace can encode for a feed is in that feed's
@@ -209,6 +211,7 @@ fn each_feeds_table_is_the_one_its_specification_states() {
         dz_edge_core::EndOfSession::TYPE_ID,
         dz_edge_refdata::InstrumentDefinition::TYPE_ID,
         dz_edge_refdata::ManifestSummary::TYPE_ID,
+        dz_edge_refdata::StrikeInterval::TYPE_ID,
     ] {
         assert!(
             TopOfBook::carries(type_id),
@@ -226,6 +229,7 @@ fn each_feeds_table_is_the_one_its_specification_states() {
         dz_edge_core::EndOfSession::TYPE_ID,
         dz_edge_refdata::InstrumentDefinition::TYPE_ID,
         dz_edge_refdata::ManifestSummary::TYPE_ID,
+        dz_edge_refdata::StrikeInterval::TYPE_ID,
     ] {
         assert!(
             MarketByPrice::carries(type_id),

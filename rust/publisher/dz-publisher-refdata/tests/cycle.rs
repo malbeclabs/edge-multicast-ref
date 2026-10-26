@@ -18,8 +18,8 @@ use dz_edge_core::AppMessage;
 use dz_edge_refdata::{InstrumentDefinition, ManifestSummary};
 use dz_publisher_lowering::SourceId;
 use dz_publisher_refdata::{
-    definitions_per_datagram, CycleSchedule, ManualClock, MemoryStore, Registry, RegistryConfig,
-    SelectionPolicy, ShardConfig, LAP_PERCENT,
+    definitions_per_datagram, CycleSchedule, IdAllocation, ManualClock, MemoryStore, Registry,
+    RegistryConfig, SelectionPolicy, ShardConfig, LAP_PERCENT,
 };
 
 /// The mandated datagram size. Not derived here: every feed specification
@@ -61,6 +61,7 @@ fn seeded(
         selection: SelectionPolicy::from_seed(published.max(1)).expect("a seed"),
         schedule: CycleSchedule::new(CYCLE, MTU, datagrams_per_tick),
         forget_delisted_after: None,
+        id_allocation: IdAllocation::Sequential,
     };
     let mut registry = Registry::open(config, MemoryStore::new(), clock.clone())
         .expect("an empty directory is a cold start");
@@ -106,6 +107,7 @@ fn seeded_on_two_shards(
         selection: SelectionPolicy::from_seed((alpha + beta).max(1)).expect("a seed"),
         schedule: CycleSchedule::new(CYCLE, MTU, datagrams_per_tick),
         forget_delisted_after: None,
+        id_allocation: IdAllocation::Sequential,
     };
     let mut registry = Registry::open(config, MemoryStore::new(), clock.clone())
         .expect("an empty directory is a cold start");
@@ -195,7 +197,10 @@ fn one_lap_covers_every_published_instrument_exactly_once() {
     for _ in 0..24 {
         clock.advance(Duration::from_secs(1));
         registry.definition_tick(DEFAULT_SHARD, &mut out);
-        seen.extend(out.iter().map(|definition| definition.instrument_id));
+        seen.extend(
+            out.iter()
+                .map(|definition| definition.definition.instrument_id),
+        );
     }
 
     seen.sort_unstable();
@@ -295,7 +300,7 @@ fn an_emitted_definition_carries_the_manifest_it_belongs_to() {
     assert_eq!(out.len(), 2);
     for definition in &out {
         assert_eq!(
-            definition.manifest_seq,
+            definition.definition.manifest_seq,
             registry
                 .manifest_seq(DEFAULT_SHARD)
                 .expect("the default shard")
@@ -310,7 +315,7 @@ fn an_emitted_definition_carries_the_manifest_it_belongs_to() {
     registry.definition_tick(DEFAULT_SHARD, &mut out);
     assert!(!out.is_empty());
     for definition in &out {
-        assert_eq!(definition.manifest_seq, after);
+        assert_eq!(definition.definition.manifest_seq, after);
     }
 }
 
@@ -387,6 +392,7 @@ fn the_valid_flag_means_the_published_set_is_established() {
         selection: SelectionPolicy::from_seed(4).expect("4 is a seed"),
         schedule: CycleSchedule::new(CYCLE, MTU, 8),
         forget_delisted_after: None,
+        id_allocation: IdAllocation::Sequential,
     };
     let mut registry = Registry::open(config, MemoryStore::new(), clock.clone())
         .expect("an empty directory is a cold start");
@@ -511,7 +517,10 @@ fn one_lap_of_one_shards_cycle_covers_that_shard_and_none_of_the_other() {
     for _ in 0..24 {
         clock.advance(Duration::from_secs(1));
         registry.definition_tick(ALPHA, &mut out);
-        seen.extend(out.iter().map(|definition| definition.instrument_id));
+        seen.extend(
+            out.iter()
+                .map(|definition| definition.definition.instrument_id),
+        );
     }
 
     seen.sort_unstable();
@@ -531,7 +540,10 @@ fn one_lap_of_one_shards_cycle_covers_that_shard_and_none_of_the_other() {
     for _ in 0..24 {
         clock.advance(Duration::from_secs(1));
         registry.definition_tick(BETA, &mut out);
-        others.extend(out.iter().map(|definition| definition.instrument_id));
+        others.extend(
+            out.iter()
+                .map(|definition| definition.definition.instrument_id),
+        );
     }
     others.sort_unstable();
     assert_eq!(others, (25..=48).collect::<Vec<u32>>());
@@ -589,12 +601,12 @@ fn a_definition_carries_its_own_shards_manifest_and_not_another_shards() {
 
     registry.definition_tick(ALPHA, &mut out);
     assert_eq!(out.len(), 1);
-    assert_eq!(out[0].manifest_seq, alpha);
+    assert_eq!(out[0].definition.manifest_seq, alpha);
 
     registry.definition_tick(BETA, &mut out);
     assert_eq!(out.len(), 3);
     for definition in &out {
-        assert_eq!(definition.manifest_seq, beta);
+        assert_eq!(definition.definition.manifest_seq, beta);
     }
 
     // And the same instrument asked for on its own, which is the path a new
@@ -604,4 +616,39 @@ fn a_definition_carries_its_own_shards_manifest_and_not_another_shards() {
         registry.definition(handle).expect("published").manifest_seq,
         registry.manifest_seq(BETA).expect("configured")
     );
+}
+
+/// The pacer says what it owes without taking it, so a caller whose ceiling
+/// costs a walk makes the walk only when something is owed.
+#[test]
+fn the_pacer_states_its_debt_without_taking_it() {
+    let schedule = CycleSchedule::new(CYCLE, MTU, 1);
+    let mut pacer = dz_publisher_refdata::DefinitionPacer::new(schedule);
+    let second = 1_000_000_000u64;
+
+    assert_eq!(pacer.owed(0, 24), 0, "no lap has started");
+    assert_eq!(pacer.due(0, 24), 0, "which starts it");
+    assert_eq!(pacer.owed(0, 24), 0, "and no time has passed");
+
+    // A 24-second lap of 24 instruments owes one a second.
+    assert_eq!(pacer.owed(3 * second, 24), 3);
+    assert_eq!(pacer.owed(3 * second, 24), 3, "asking takes nothing");
+    assert_eq!(pacer.due_at_most(3 * second, 24, 2), 2);
+    assert_eq!(pacer.owed(3 * second, 24), 1, "what the ceiling held back");
+    assert_eq!(pacer.due(3 * second, 24), 1);
+    assert_eq!(pacer.owed(3 * second, 24), 0);
+    assert_eq!(pacer.owed(3 * second, 0), 0, "nothing is published");
+}
+
+/// A fit behind something else already in the first datagram.
+#[test]
+fn a_fit_behind_a_reserved_message_holds_one_pair_fewer() {
+    let schedule = CycleSchedule::new(CYCLE, MTU, 1);
+    let pairs = || std::iter::repeat_n(170usize, 20);
+    assert_eq!(schedule.fitting(pairs()), 7);
+    assert_eq!(schedule.fitting_behind(24, pairs()), 6);
+    assert_eq!(schedule.fitting_behind(0, pairs()), 7);
+    // Never zero for something to send, however much is reserved.
+    assert_eq!(schedule.fitting_behind(5_000, pairs()), 1);
+    assert_eq!(schedule.fitting_behind(24, std::iter::empty()), 0);
 }

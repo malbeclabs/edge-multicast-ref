@@ -521,6 +521,81 @@ func TestParseSnapshotLevel(t *testing.T) {
 	}
 }
 
+// strikeIntervalBody builds a 36-byte StrikeInterval body. The four reserved
+// bytes at the end are left as the caller's to set.
+func strikeIntervalBody(instID uint32, sourceID uint16, exp int8, flags uint8, lower, upper int64, fixingNS uint64) []byte {
+	b := make([]byte, 36)
+	binary.LittleEndian.PutUint32(b[0:4], instID)
+	binary.LittleEndian.PutUint16(b[4:6], sourceID)
+	b[6] = byte(exp)
+	b[7] = flags
+	binary.LittleEndian.PutUint64(b[8:16], uint64(lower))
+	binary.LittleEndian.PutUint64(b[16:24], uint64(upper))
+	binary.LittleEndian.PutUint64(b[24:32], fixingNS)
+	return b
+}
+
+func TestParseStrikeInterval(t *testing.T) {
+	// A negative lower bound and a negative exponent, so a decoder reading
+	// either as unsigned fails; distinct bounds, so one exchanging them does.
+	buf := strikeIntervalBody(77, 5, -3, 0x0D, -1500, 2500, 1700000000000000009)
+	body, err := ParseStrikeInterval(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := StrikeIntervalBody{
+		InstrumentID: 77, SourceID: 5, StrikeExponent: -3, BoundFlags: 0x0D,
+		LowerBoundRaw: -1500, UpperBoundRaw: 2500,
+		FixingTime: time.Unix(0, 1700000000000000009).UTC(),
+	}
+	if body != want {
+		t.Errorf("got %+v, want %+v", body, want)
+	}
+	if body.Pending() {
+		t.Error("a strike with both bounds present reads as pending")
+	}
+}
+
+// A subscriber ignores Bound Flags bits 4-7, and the publisher rules under the
+// Bound Flags table are the publisher's: none of them is a reason for a reader
+// to refuse the body. Each case here is something a conforming publisher never
+// sends and this decoder still returns, with the byte as it arrived.
+func TestParseStrikeInterval_DecodesWhatAPublisherRuleForbids(t *testing.T) {
+	cases := []struct {
+		name        string
+		flags       uint8
+		lower       int64
+		upper       int64
+		wantPending bool
+	}{
+		{"reserved bits set on a fixed strike", 0xF3, 100, 0, false},
+		{"reserved bits set on a pending strike", 0xF0, 0, 0, true},
+		{"inclusive bits without their presence bits", 0x0A, 0, 0, true},
+		{"a bound left non-zero behind a clear presence bit", 0x00, 42, 43, true},
+		{"lower above upper", 0x0F, 10, 5, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			buf := strikeIntervalBody(1, 2, 0, c.flags, c.lower, c.upper, 0)
+			// The reserved tail too: a publisher zeroes it, a reader does not look.
+			copy(buf[32:36], []byte{0xDE, 0xAD, 0xBE, 0xEF})
+			body, err := ParseStrikeInterval(buf)
+			if err != nil {
+				t.Fatalf("refused: %v", err)
+			}
+			if body.BoundFlags != c.flags {
+				t.Errorf("BoundFlags = 0x%02x, want the byte as it arrived, 0x%02x", body.BoundFlags, c.flags)
+			}
+			if body.LowerBoundRaw != c.lower || body.UpperBoundRaw != c.upper {
+				t.Errorf("bounds = %d, %d, want %d, %d", body.LowerBoundRaw, body.UpperBoundRaw, c.lower, c.upper)
+			}
+			if body.Pending() != c.wantPending {
+				t.Errorf("Pending() = %v, want %v", body.Pending(), c.wantPending)
+			}
+		})
+	}
+}
+
 func TestNewBodies_ExactLengthOnly(t *testing.T) {
 	cases := []struct {
 		name string
@@ -528,6 +603,7 @@ func TestNewBodies_ExactLengthOnly(t *testing.T) {
 		fn   func([]byte) error
 	}{
 		{"liquidation", 44, func(b []byte) error { _, err := ParseLiquidation(b); return err }},
+		{"strike_interval", 36, func(b []byte) error { _, err := ParseStrikeInterval(b); return err }},
 		{"snapshot_begin", 36, func(b []byte) error { _, err := ParseSnapshotBegin(b); return err }},
 		{"level_update", 44, func(b []byte) error { _, err := ParseLevelUpdate(b); return err }},
 		{"book_clear", 32, func(b []byte) error { _, err := ParseBookClear(b); return err }},

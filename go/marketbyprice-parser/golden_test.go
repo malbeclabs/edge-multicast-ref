@@ -6,17 +6,18 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/malbeclabs/edge-multicast-ref/go/internal/golden"
 )
 
 // The golden vectors are the cross-language contract. The Rust codec crate
 // writes the five depth files and asserts the same field values against them;
-// the four below them — Trade, both InstrumentDefinition generations and
-// ManifestSummary — were transcribed by hand from the field tables in
-// edge-feed-spec. The five `-from-event-` files are the shared lowering's
-// output for a normalized event, written by dz-publisher-lowering. This side
-// reads all fourteen with this parser's own decoder.
+// the five below them — Trade, both InstrumentDefinition generations,
+// ManifestSummary and StrikeInterval — were transcribed by hand from the field
+// tables in edge-feed-spec. The five `-from-event-` files are the shared
+// lowering's output for a normalized event, written by dz-publisher-lowering.
+// This side reads all fifteen with this parser's own decoder.
 //
 // That is what makes them worth having. Two implementations tested only against
 // themselves agree with themselves — including when both are wrong in the same
@@ -31,7 +32,9 @@ import (
 //
 // Trade, InstrumentDefinition and ManifestSummary are byte-identical across the
 // family and this parser decodes its own copy of each, so the vectors bind them
-// here as well as in the top-of-book and market-by-order parsers. The depth
+// here as well as in the top-of-book and market-by-order parsers.
+// StrikeInterval is byte-identical in the two feeds that carry it, this one and
+// top-of-book, and is bound in both; market-by-order reserves 0x09. The depth
 // vectors are this feed's, with one exception in the other direction:
 // SnapshotEnd is the same 16-byte body under type id 0x22 in market-by-order,
 // and that parser binds snapshot-end-v3.bin too.
@@ -48,11 +51,12 @@ import (
 // in wire units, or the `_ns` the wire structs drop because they hold a
 // time.Time:
 //
-//	trade_price         -> TradePriceRaw        tick_size -> TickSizeRaw
-//	trade_qty           -> TradeQtyRaw          lot_size  -> LotSizeRaw
-//	cumulative_volume   -> CumulativeVolumeRaw
-//	source_timestamp_ns -> SourceTimestamp      expiry_ns -> Expiry
-//	timestamp_ns        -> Timestamp
+//	trade_price         -> TradePriceRaw        tick_size      -> TickSizeRaw
+//	trade_qty           -> TradeQtyRaw          lot_size       -> LotSizeRaw
+//	cumulative_volume   -> CumulativeVolumeRaw  lower_bound    -> LowerBoundRaw
+//	source_timestamp_ns -> SourceTimestamp      upper_bound    -> UpperBoundRaw
+//	timestamp_ns        -> Timestamp            expiry_ns      -> Expiry
+//	                                            fixing_time_ns -> FixingTime
 //
 // Every other field is the manifest's name in Go's capitalisation, and every
 // time.Time is compared as the nanoseconds the manifest states.
@@ -142,10 +146,10 @@ type goldenVector struct {
 }
 
 // goldenVectors is every vector this parser reads: its own five depth messages,
-// the four the family shares, and the five the shared lowering produced from a
+// the five the family shares, and the five the shared lowering produced from a
 // normalized event. The one it does not read is quote-v3.bin, which this feed
 // has no message type for — goldenVectorsReadElsewhere names it and the suite
-// that does.
+// that reads it.
 func goldenVectors() []goldenVector {
 	return append(goldenDepthVectors(), append(goldenSharedVectors(), goldenLoweredVectors()...)...)
 }
@@ -284,6 +288,28 @@ func goldenSharedVectors() []goldenVector {
 					{Name: "manifest_seq", Got: int64(m.ManifestSeq), Want: 9},
 					{Name: "instrument_count", Got: int64(m.InstrumentCount), Want: 1234},
 					{Name: "timestamp_ns", Got: m.Timestamp.UnixNano(), Want: 1700000000000000002},
+				}, nil
+			},
+		},
+		{
+			// Bound Flags 7 is a lower bound that is present and inclusive and
+			// an upper bound that is present and exclusive, so the two bounds
+			// and the two halves of the flag byte each carry a value of their
+			// own and a decoder exchanging either pair fails.
+			file: "strike-interval-v3.bin", typeID: msgTypeStrikeInterval, size: 40, flags: 0, schema: mbpSchemaVersionV3,
+			rows: func(t *testing.T, body []byte) ([]goldenField, []goldenText) {
+				s, err := ParseStrikeInterval(body)
+				if err != nil {
+					t.Fatalf("ParseStrikeInterval: %v", err)
+				}
+				return []goldenField{
+					{Name: "instrument_id", Got: int64(s.InstrumentID), Want: 1},
+					{Name: "source_id", Got: int64(s.SourceID), Want: 2},
+					{Name: "strike_exponent", Got: int64(s.StrikeExponent), Want: -2},
+					{Name: "bound_flags", Got: int64(s.BoundFlags), Want: 7},
+					{Name: "lower_bound", Got: s.LowerBoundRaw, Want: 9270000},
+					{Name: "upper_bound", Got: s.UpperBoundRaw, Want: 9279999},
+					{Name: "fixing_time_ns", Got: s.FixingTime.UnixNano(), Want: 1700000000000000003},
 				}, nil
 			},
 		},
@@ -467,6 +493,8 @@ func TestGoldenInstrumentDefinitionV1(t *testing.T) {
 
 func TestGoldenManifestSummary(t *testing.T) { runGoldenVector(t, "manifest-summary-v3.bin") }
 
+func TestGoldenStrikeInterval(t *testing.T) { runGoldenVector(t, "strike-interval-v3.bin") }
+
 // The lowered vectors. One case each, named like the rest, because a file read
 // only inside a loop over a table is a file whose failure names a subtest and
 // not a message.
@@ -538,7 +566,7 @@ func TestGoldenManifestStatesWhatTheseCasesAssert(t *testing.T) {
 // goldenVectorsReadElsewhere names the vectors the manifest carries that this
 // parser has no message type for, and the suite that reads each.
 //
-// This parser decodes fourteen of the fifteen, which makes it the one place a
+// This parser decodes fifteen of the sixteen, which makes it the one place a
 // vector nobody reads can be noticed at all. That is what the list is for: a
 // vector no suite reads and no document mentions is invisible rather than
 // merely unbound, and it stays that way until someone counts the files by
@@ -579,4 +607,57 @@ func TestGoldenManifestHasNoVectorNobodyReads(t *testing.T) {
 	// Every loop above walks the manifest, so a `.bin` committed with no row
 	// is bound by nothing in either language and fails nothing without this.
 	golden.RequireEveryVectorIsStated(t, goldenDir, stated)
+}
+
+// TestParseDatagramDecodesTheStrikeIntervalVector is the strike on the datagram
+// a publisher sends it in: the reference-data supplement puts a StrikeInterval
+// directly behind its InstrumentDefinition. The definition before it and the
+// ManifestSummary after it are the golden vectors too, so the three are real
+// messages at their real lengths.
+//
+// A valid StrikeInterval is a message of this feed and not a Type ID this
+// parser has yet to learn, so it is a record and it is not counted: before this
+// parser decoded 0x09 every strike a publisher sent added one to UnknownType,
+// which the runner exports as skipped_messages_total.
+func TestParseDatagramDecodesTheStrikeIntervalVector(t *testing.T) {
+	definition := goldenBytes(t, "instrument-definition-v3.bin")
+	strike := goldenBytes(t, "strike-interval-v3.bin")
+	summary := goldenBytes(t, "manifest-summary-v3.bin")
+
+	total := datagramHeaderSize + len(definition) + len(strike) + len(summary)
+	datagram := buildDatagramHeader(mbpMagic, mbpSchemaVersionV3, 7, 1, time.Unix(1700000300, 0), 3, 0, uint16(total))
+	datagram = append(datagram, definition...)
+	datagram = append(datagram, strike...)
+	datagram = append(datagram, summary...)
+
+	p := &marketByPriceParser{}
+	recs, defects, err := p.ParseDatagram("refdata", datagram)
+	if err != nil {
+		t.Fatalf("a datagram carrying a StrikeInterval failed to parse: %v", err)
+	}
+	if len(recs) != 3 {
+		t.Fatalf("got %d records, want the definition, its strike and the summary: %+v", len(recs), recs)
+	}
+	for i, want := range []string{"instrument_definition", "strike_interval", "manifest_summary"} {
+		if recs[i].Type != want {
+			t.Errorf("record %d is %q, want %q", i, recs[i].Type, want)
+		}
+	}
+	if defects != (Defects{}) {
+		t.Errorf("defects = %+v, want none: a valid StrikeInterval is not an unknown type and not a publisher defect", defects)
+	}
+
+	// The pair is one instrument's, from one matching engine, in one datagram:
+	// the three things a book-builder compares before it holds the strike.
+	def, st := recs[0], recs[1]
+	if st.InstrumentID != def.InstrumentID {
+		t.Errorf("strike instrument_id = %d, definition's = %d", st.InstrumentID, def.InstrumentID)
+	}
+	if got, want := st.Fields["source_id"], def.Fields["source_id"]; got != want {
+		t.Errorf("strike source_id = %v, definition's = %v", got, want)
+	}
+	if st.SequenceNumber != def.SequenceNumber || st.Port != def.Port || st.ChannelID != def.ChannelID {
+		t.Errorf("strike is from datagram (%d, %q, %d), definition from (%d, %q, %d)",
+			st.ChannelID, st.Port, st.SequenceNumber, def.ChannelID, def.Port, def.SequenceNumber)
+	}
 }

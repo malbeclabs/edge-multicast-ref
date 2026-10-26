@@ -26,7 +26,10 @@ pub struct MetricsObserver {
     /// Adapter failures the closed family set has no series for. See
     /// [`IngressObserver::adapter_error`] and
     /// [`Self::adapter_errors`].
-    adapter_errors: std::cell::Cell<u64>,
+    ///
+    /// Atomic, so the observer is `Sync` and one can be shared by connections
+    /// driven on several threads.
+    adapter_errors: std::sync::atomic::AtomicU64,
 }
 
 impl MetricsObserver {
@@ -34,7 +37,7 @@ impl MetricsObserver {
     pub fn new(metrics: Arc<PublisherMetrics>) -> Self {
         Self {
             metrics,
-            adapter_errors: std::cell::Cell::new(0),
+            adapter_errors: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -50,7 +53,8 @@ impl MetricsObserver {
     /// itself is what lets a test assert one without scraping.
     #[must_use]
     pub fn adapter_errors(&self) -> u64 {
-        self.adapter_errors.get()
+        self.adapter_errors
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -65,6 +69,10 @@ impl IngressObserver for MetricsObserver {
 
     fn duplicate(&self) {
         self.metrics.ingress().duplicate();
+    }
+
+    fn lost_to_newer_generation(&self) {
+        self.metrics.ingress().claim_lost_to_newer_generation();
     }
 
     fn parse_error(&self, error: ParseError) {
@@ -124,6 +132,7 @@ impl IngressObserver for MetricsObserver {
             AdapterError::Internal { .. } => AdapterErrorReason::Internal,
         };
         self.metrics.ingress().adapter_error(reason);
-        self.adapter_errors.set(self.adapter_errors.get() + 1);
+        self.adapter_errors
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }

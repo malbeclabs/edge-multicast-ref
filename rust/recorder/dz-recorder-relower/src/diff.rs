@@ -79,6 +79,12 @@ pub fn diff(on_wire: &MessageBody, re_lowered: &MessageBody) -> Vec<FieldDiff> {
                 wire.ask_source_count,
                 re.ask_source_count,
             );
+            cmp(
+                &mut out,
+                "venue_update_id",
+                wire.venue_update_id,
+                re.venue_update_id,
+            );
         }
         (MessageBody::Trade(wire), MessageBody::Trade(re)) => {
             cmp(

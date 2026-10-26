@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use crate::config::Credentials;
+use crate::config::{Credentials, MAX_INSERT_CONCURRENCY};
 
 /// A request could not be completed, or completed with a refusal.
 ///
@@ -79,35 +79,77 @@ pub trait Transport {
         credentials: &Credentials,
         body: &[u8],
     ) -> Result<Response, TransportError>;
+
+    /// How many bodies [`post_all`](Self::post_all) puts in flight at once.
+    ///
+    /// One unless an implementation says otherwise, and the sink reads it to
+    /// decide how many bodies to hand over together: a transport that sends one
+    /// at a time is given one at a time, so a failure still stops the bodies
+    /// behind it from being sent at all.
+    fn concurrency(&self) -> usize {
+        1
+    }
+
+    /// Posts every body to `url` once, and returns what each one got, in order.
+    ///
+    /// One attempt each and no retry: retrying is the sink's, which knows how
+    /// many attempts a batch is allowed. The default sends them one after
+    /// another, which is all a fake needs.
+    fn post_all(
+        &self,
+        url: &str,
+        credentials: &Credentials,
+        bodies: &[&[u8]],
+    ) -> Vec<Result<Response, TransportError>> {
+        bodies
+            .iter()
+            .map(|body| self.post(url, credentials, body))
+            .collect()
+    }
 }
 
-/// HTTP/1.1, over a plain connection.
+/// The level every request body is compressed at.
+///
+/// zstd's own default. A body is one batch of `JSONEachRow`, which is the same
+/// keys on every line, so the ratio is already several-fold here and a higher
+/// level would spend CPU on the recorder host to save bytes that are no longer
+/// the bottleneck.
+const BODY_COMPRESSION_LEVEL: i32 = 3;
+
+/// How long an idle connection is kept before the next request opens a new one.
+///
+/// Shorter than a column store's own keep-alive, which is what matters: a
+/// connection the server has already closed fails the request that reuses it,
+/// and that failure spends one of the sink's bounded attempts on nothing.
+const MAX_IDLE_AGE: Duration = Duration::from_secs(5);
+
+/// HTTP/1.1, over a plain connection, with every body compressed.
 ///
 /// No TLS in this build. The loader runs on the recorder host and reaches the
 /// column store over a private path, and an `https://` endpoint is refused at
 /// configuration load rather than silently downgraded — see
 /// [`ClickHouseConfig::check`](crate::ClickHouseConfig::check).
+///
+/// **The body goes out as zstd, under `Content-Encoding: zstd`.** A column store
+/// decompresses a request body by that header. Uncompressed, a recorder far from
+/// the store could not send a batch as fast as it recorded one: the rate was the
+/// receive window across the round trip, which no setting on the client moves,
+/// so the loader fell behind and stayed there.
+///
+/// **One agent for the transport's lifetime, so consecutive batches share a
+/// connection.** A connection per body paid a handshake and a slow start for
+/// every batch, which costs the most on the same long paths.
 #[derive(Debug, Clone)]
 pub struct HttpTransport {
-    timeout: Duration,
+    agent: ureq::Agent,
+    concurrency: usize,
 }
 
 impl HttpTransport {
     #[must_use]
-    pub const fn new(timeout: Duration) -> Self {
-        Self { timeout }
-    }
-}
-
-impl Transport for HttpTransport {
-    fn post(
-        &self,
-        url: &str,
-        credentials: &Credentials,
-        body: &[u8],
-    ) -> Result<Response, TransportError> {
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .timeout_global(Some(self.timeout))
+    pub fn new(timeout: Duration) -> Self {
+        let agent = ureq::Agent::config_builder()
+            .timeout_global(Some(timeout))
             // A redirect would re-send the body to somewhere the configuration
             // did not name, and the credentials with it.
             .max_redirects(0)
@@ -118,20 +160,62 @@ impl Transport for HttpTransport {
             // could not parse, and a bounded retry that throws it away leaves an
             // operator with a status code and no cause.
             .http_status_as_error(false)
+            .max_idle_age(MAX_IDLE_AGE)
+            // As many as a configuration may ask for bodies at once. The agent's
+            // own default is three, and with more than that in flight the
+            // connections past the third would be closed after every chunk and
+            // opened again for the next.
+            .max_idle_connections_per_host(MAX_INSERT_CONCURRENCY)
             .build()
             .into();
+        Self {
+            agent,
+            concurrency: 1,
+        }
+    }
 
-        let mut request = agent
+    /// Lets [`post_all`](Transport::post_all) keep `concurrency` requests in
+    /// flight, each on a connection of its own.
+    ///
+    /// The destination parses one body on the threads its profile gives the
+    /// account, so one request at a time is a ceiling on rows per second that
+    /// neither the path nor this host sets. Zero is read as one.
+    #[must_use]
+    pub fn with_concurrency(mut self, concurrency: usize) -> Self {
+        self.concurrency = concurrency.max(1);
+        self
+    }
+}
+
+impl Transport for HttpTransport {
+    fn post(
+        &self,
+        url: &str,
+        credentials: &Credentials,
+        body: &[u8],
+    ) -> Result<Response, TransportError> {
+        // Compressed whole, in memory: the body is already a buffer the sink
+        // holds, and its bound is the sink's own `insert_max_bytes`.
+        let compressed = zstd::bulk::compress(body, BODY_COMPRESSION_LEVEL).map_err(|e| {
+            TransportError::Unreachable {
+                url: url.to_owned(),
+                message: format!("the request body could not be compressed: {e}"),
+            }
+        })?;
+
+        let mut request = self
+            .agent
             .post(url)
             // The user goes in a header rather than in the query string, because
             // a query string is what ends up in an access log.
             .header("X-ClickHouse-User", &credentials.user)
-            .header("Content-Type", "application/json");
+            .header("Content-Type", "application/json")
+            .header("Content-Encoding", "zstd");
         if let Some(password) = credentials.password() {
             request = request.header("X-ClickHouse-Key", password);
         }
 
-        match request.send(body) {
+        match request.send(compressed.as_slice()) {
             Ok(mut response) => {
                 let status = response.status().as_u16();
                 let body = response
@@ -162,5 +246,67 @@ impl Transport for HttpTransport {
                 message: e.to_string(),
             }),
         }
+    }
+
+    fn concurrency(&self) -> usize {
+        self.concurrency
+    }
+
+    /// The bodies, with up to [`concurrency`](Self::concurrency) of them in
+    /// flight. Compression happens on the sending thread, so it is spread over
+    /// the same threads as the requests.
+    fn post_all(
+        &self,
+        url: &str,
+        credentials: &Credentials,
+        bodies: &[&[u8]],
+    ) -> Vec<Result<Response, TransportError>> {
+        let workers = self.concurrency.min(bodies.len());
+        if workers <= 1 {
+            return bodies
+                .iter()
+                .map(|body| self.post(url, credentials, body))
+                .collect();
+        }
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let mut results: Vec<Option<Result<Response, TransportError>>> =
+            (0..bodies.len()).map(|_| None).collect();
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..workers)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut mine = Vec::new();
+                        loop {
+                            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let Some(body) = bodies.get(i) else {
+                                break;
+                            };
+                            mine.push((i, self.post(url, credentials, body)));
+                        }
+                        mine
+                    })
+                })
+                .collect();
+            for handle in handles {
+                // A sender that panicked leaves its bodies unanswered, and those
+                // are reported below as unreachable rather than as landed.
+                if let Ok(mine) = handle.join() {
+                    for (i, result) in mine {
+                        results[i] = Some(result);
+                    }
+                }
+            }
+        });
+        results
+            .into_iter()
+            .map(|result| {
+                result.unwrap_or_else(|| {
+                    Err(TransportError::Unreachable {
+                        url: url.to_owned(),
+                        message: "the request was never sent: its sender stopped".to_owned(),
+                    })
+                })
+            })
+            .collect()
     }
 }

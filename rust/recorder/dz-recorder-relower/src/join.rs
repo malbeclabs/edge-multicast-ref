@@ -172,6 +172,7 @@ mod tests {
             ask_qty: 1,
             bid_source_count: 0,
             ask_source_count: 0,
+            venue_update_id: 0,
         };
         let trade = Trade {
             instrument_id: 7,

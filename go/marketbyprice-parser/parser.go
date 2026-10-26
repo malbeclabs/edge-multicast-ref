@@ -7,6 +7,12 @@ import (
 
 // Record is the JSON-serialised envelope emitted by the parser for every
 // wire message. The book-builder consumes these one per line on the parser socket.
+//
+// MessageIndex is the position of the record's message among the application
+// messages of its datagram, from 0. It counts every message, the ones this
+// parser skips or drops included, so two records of one datagram whose indexes
+// differ by one were neighbours on the wire, and two that are neighbours here
+// with a gap between their indexes were not.
 type Record struct {
 	Type           string         `json:"type"`
 	Timestamp      time.Time      `json:"ts"`
@@ -17,6 +23,7 @@ type Record struct {
 	ChannelID      uint8          `json:"channel_id"`
 	Port           string         `json:"port"`
 	SequenceNumber uint64         `json:"seq"`
+	MessageIndex   uint8          `json:"msg_index"`
 	ResetCount     uint8          `json:"reset_count"`
 	InstrumentID   uint32         `json:"instrument_id,omitempty"`
 	Fields         map[string]any `json:"fields,omitempty"`

@@ -145,6 +145,7 @@ impl dz_edge_core::Feed for MarketByPrice {
         0x06, // EndOfSession
         0x07, // ManifestSummary
         0x08, // Liquidation
+        0x09, // StrikeInterval
         0x13, // BatchBoundary
         0x14, // InstrumentReset
         0x20, // SnapshotBegin

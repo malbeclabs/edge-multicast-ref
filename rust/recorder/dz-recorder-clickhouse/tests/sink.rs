@@ -290,6 +290,109 @@ fn a_rejected_statement_is_not_retried_at_all() {
     assert!(sink.last_error().is_some_and(|e| e.contains("datagram")));
 }
 
+/// A transport that takes several bodies at once is handed one grain's bodies a
+/// chunk at a time, in order, and every row still goes out exactly once.
+#[test]
+fn bodies_of_one_grain_go_out_a_chunk_at_a_time_and_grains_stay_in_order() {
+    let rows = batch(100, Fault::None);
+    let total = rows.rows(Grain::Datagram);
+    let mut tuned = config();
+    tuned.insert_max_rows = 30;
+    let mut sink = ClickHouseSink::with_transport(
+        tuned,
+        Credentials::new("loader", None),
+        FakeTransport::new().taking(3),
+    );
+    sink.write_batch(rows, NOW).expect("the batch lands");
+
+    let sent = sink_sent(&sink);
+    let tables: Vec<String> = sent.iter().map(common::Sent::table).collect();
+    let datagram = tables
+        .iter()
+        .filter(|t| t.as_str() == "recorder.datagram")
+        .count();
+    assert_eq!(datagram, 4, "100 rows at 30 a request");
+    assert_eq!(
+        sent.iter()
+            .filter(|s| s.table() == "recorder.datagram")
+            .map(|s| s.rows().len())
+            .sum::<usize>(),
+        total,
+        "every row was sent exactly once"
+    );
+    // The base grain is complete before anything derived from it is sent: no
+    // datagram body follows a body of another table.
+    let last_datagram = tables
+        .iter()
+        .rposition(|t| t == "recorder.datagram")
+        .expect("datagram rows were sent");
+    assert_eq!(
+        last_datagram + 1,
+        datagram,
+        "the datagram bodies are the first requests, with nothing between them: {tables:?}"
+    );
+}
+
+/// A refusal stops the chunks behind it, as it stops the bodies behind it when
+/// they go one at a time: what was in flight with it was sent, nothing after.
+#[test]
+fn a_refusal_in_one_chunk_stops_the_chunks_behind_it() {
+    let rows = batch(100, Fault::None);
+    let mut tuned = config();
+    tuned.insert_max_rows = 30;
+    let mut sink = ClickHouseSink::with_transport(
+        tuned,
+        Credentials::new("loader", None),
+        FakeTransport::answering(vec![Answer::Refused(400)]).taking(2),
+    )
+    .waiting_with(no_wait);
+
+    let error = sink
+        .write_batch(rows, NOW)
+        .expect_err("a request the server refuses is a failed load");
+    assert!(matches!(error, RowSinkError::Rejected { .. }), "{error}");
+    assert_eq!(sink.batches_failed(), 1);
+    assert_eq!(
+        sink_sent(&sink).len(),
+        2,
+        "the refused body and the one sent with it, and neither of the two behind them"
+    );
+}
+
+/// A body that failed beside others is retried on its own, with the same bytes,
+/// and the bodies that landed are not sent again.
+#[test]
+fn a_body_that_failed_beside_others_is_retried_alone() {
+    let rows = batch(60, Fault::None);
+    let mut tuned = config();
+    tuned.insert_max_rows = 30;
+    let mut sink = ClickHouseSink::with_transport(
+        tuned,
+        Credentials::new("loader", None),
+        FakeTransport::answering(vec![Answer::Unreachable]).taking(2),
+    )
+    .waiting_with(no_wait);
+    sink.write_batch(rows, NOW)
+        .expect("the retry lands the body");
+
+    let sent = sink_sent(&sink);
+    let datagram: Vec<_> = sent
+        .iter()
+        .filter(|s| s.table() == "recorder.datagram")
+        .collect();
+    assert_eq!(
+        datagram.len(),
+        3,
+        "two bodies, and the first of them a second time"
+    );
+    assert_eq!(
+        datagram[0].body, datagram[2].body,
+        "the retry is the bytes that failed"
+    );
+    assert_ne!(datagram[0].body, datagram[1].body);
+    assert_eq!(sink.batches_failed(), 0);
+}
+
 /// A 5xx and a 429 are the server's own admission that the failure is not the
 /// request's, so those are retried and then given up on.
 #[test]

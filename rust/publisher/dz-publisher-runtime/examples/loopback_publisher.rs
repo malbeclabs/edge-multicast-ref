@@ -116,6 +116,7 @@ impl Adapter for Fixture {
                 qty: Scalar::text("72.50"),
                 source_count: Some(4),
             },
+            venue_update_id: None,
         });
 
         // A one-sided quote, so the gone flag reaches a subscriber that has
@@ -129,6 +130,7 @@ impl Adapter for Fixture {
                 qty: Scalar::text("72.50"),
                 source_count: None,
             },
+            venue_update_id: None,
         });
 
         out.event(dz_adapter_core::Event::Trade {
@@ -286,6 +288,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             selection: SelectionPolicy::new(8, 16, 8)?,
             schedule: CycleSchedule::new(feed.definition_cycle, 1232, 1),
             forget_delisted_after: None,
+            id_allocation: dz_publisher_refdata::IdAllocation::Sequential,
         },
         FileStore::new(&state_dir),
         clock.clone(),

@@ -1,6 +1,7 @@
 package tob
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"math"
@@ -14,6 +15,19 @@ type instrumentInfo struct {
 	Symbol        string
 	PriceExponent int8
 	QtyExponent   int8
+
+	// Strike is the instrument's strike, or nil when its contract does not pay
+	// on one. It is the Reference Data supplement's state.strikes, held inside
+	// the definition so that the two cannot have different lifetimes: every
+	// definition starts with none, the StrikeInterval directly behind it in the
+	// same datagram sets it, and a channel reset drops both.
+	Strike *topOfBookStrikeInterval
+
+	// def is the decoded message this entry was stored from. A StrikeInterval
+	// is held only on the entry stored from the very message before it, and
+	// the pointer is how that is told: the mktdata goroutine can clear or
+	// replace the entry between the two, since the lock is taken per message.
+	def *topOfBookInstrumentDef
 }
 
 // bufferedMsg holds a raw datagram message that arrived before its
@@ -44,6 +58,9 @@ type TopOfBookParser struct {
 	// bufferFullLogged records whether we've already emitted an INFO log
 	// about hitting the cap; further drops log at DEBUG.
 	bufferFullLogged bool
+	// strikesIgnored counts StrikeInterval messages ignored under the
+	// supplement's Strike State rule 5. A conforming publisher sends none.
+	strikesIgnored uint64
 }
 
 func NewTopOfBookParser() *TopOfBookParser {
@@ -105,12 +122,23 @@ func (p *TopOfBookParser) Parse(data []byte, meta PacketMeta) ([]Record, error) 
 	sendTS := datagram.Header.SendTimestamp
 
 	var records []Record
+	// prevDef is the InstrumentDefinition the message before this one was, if it
+	// was one. A StrikeInterval is its instrument's strike only directly behind
+	// that instrument's definition, in the same datagram; a message of any other
+	// type in between, one this decoder skips included, ends that.
+	var prevDef *topOfBookInstrumentDef
 	for i := range datagram.Messages {
 		msg := &datagram.Messages[i]
-		recs, err := p.processMessage(channelID, seq, reset, sendTS, meta, msg)
-		if err != nil {
-			return records, fmt.Errorf("processing message type 0x%02x: %w", msg.MsgType, err)
+		var recs []Record
+		if strike, ok := msg.Body.(*topOfBookStrikeInterval); ok {
+			recs = p.handleStrikeInterval(channelID, seq, reset, sendTS, meta, strike, prevDef, datagram.Header.SchemaVersion)
+		} else {
+			recs, err = p.processMessage(channelID, seq, reset, sendTS, meta, msg)
+			if err != nil {
+				return records, fmt.Errorf("processing message type 0x%02x: %w", msg.MsgType, err)
+			}
 		}
+		prevDef, _ = msg.Body.(*topOfBookInstrumentDef)
 		records = append(records, recs...)
 	}
 
@@ -172,6 +200,7 @@ func (p *TopOfBookParser) handleInstrumentDef(channelID uint8, seq uint64, reset
 		Symbol:        trimNull(body.Symbol),
 		PriceExponent: body.PriceExponent,
 		QtyExponent:   body.QtyExponent,
+		def:           body,
 	}
 
 	p.mu.Lock()
@@ -216,6 +245,107 @@ func (p *TopOfBookParser) handleInstrumentDef(channelID uint8, seq uint64, reset
 			"price_bound":    body.PriceBound,
 			"manifest_seq":   body.ManifestSeq,
 		},
+	}}, meta)
+}
+
+// handleStrikeInterval holds a strike on the definition it arrived behind and
+// surfaces it as a record. prevDef is the InstrumentDefinition immediately
+// before it in the datagram, or nil when the message before it was anything
+// else or there was none.
+//
+// Strike State rule 5 of the Reference Data supplement: a subscriber MUST
+// ignore a StrikeInterval that does not immediately follow an
+// InstrumentDefinition with the same Instrument ID, and one whose Source ID
+// differs from that definition's where the definition carries one — which a
+// schema 1 definition does not. Ignored means it changes nothing and yields no
+// record: the strike held for the instrument, if any, stays.
+func (p *TopOfBookParser) handleStrikeInterval(channelID uint8, seq uint64, reset uint8, sendTS uint64, meta PacketMeta, body *topOfBookStrikeInterval, prevDef *topOfBookInstrumentDef, schemaVersion uint8) []Record {
+	var why string
+	switch {
+	case prevDef == nil || prevDef.InstrumentID != body.InstrumentID:
+		why = "not directly behind the definition of its instrument"
+	case schemaVersion == schemaVersionV3 && prevDef.SourceID != body.SourceID:
+		why = "Source ID differs from its definition's"
+	}
+
+	// The last StrikeInterval for an instrument is its current strike, held on
+	// the definition it arrived behind and on no other. That definition was
+	// stored a moment ago by handleInstrumentDef, under a lock released since:
+	// the refdata and mktdata ports are read by two goroutines sharing this
+	// parser, and a ChannelReset travels either port. One that lands in between
+	// has cleared the definition, and the strike of a definition this parser no
+	// longer holds is nobody's: holding it is impossible and emitting it would
+	// tell a consumer of a strike on an instrument the parser has just told it
+	// to forget. So the check and the store are one critical section, and the
+	// record is emitted only if the store happened.
+	held := *body
+	p.mu.Lock()
+	if why == "" {
+		if info, ok := p.instruments[body.InstrumentID]; ok && info.def == prevDef {
+			info.Strike = &held
+		} else {
+			why = "its definition is no longer held"
+		}
+	}
+	var ignored uint64
+	if why != "" {
+		p.strikesIgnored++
+		ignored = p.strikesIgnored
+	}
+	p.mu.Unlock()
+
+	if why != "" {
+		// The first one is the news; a publisher that does this does it for
+		// every instrument on every definition cycle.
+		level := slog.LevelDebug
+		if ignored == 1 {
+			level = slog.LevelWarn
+		}
+		slog.Log(context.Background(), level, "edge: strike interval ignored",
+			"parser", "topofbook",
+			"reason", why,
+			"instrument_id", body.InstrumentID,
+			"source_id", body.SourceID,
+			"channel_id", channelID,
+			"seq", seq,
+			"ignored_total", ignored)
+		return nil
+	}
+
+	fields := map[string]any{
+		"source_id":       body.SourceID,
+		"strike_exponent": body.StrikeExponent,
+		"bound_flags":     body.BoundFlags,
+		"pending":         body.pending(),
+		"lower_present":   body.BoundFlags&boundLowerPresent != 0,
+		"lower_inclusive": body.BoundFlags&boundLowerInclusive != 0,
+		"upper_present":   body.BoundFlags&boundUpperPresent != 0,
+		"upper_inclusive": body.BoundFlags&boundUpperInclusive != 0,
+	}
+	// Raw, in units of 10^strike_exponent, as tick_size is in a definition:
+	// scaled to a float64 a strike of fifteen or more digits would not survive.
+	// A bound that is not present is no limit on that side, and the wire's 0
+	// there is padding, so it is omitted rather than read as a strike of zero.
+	if body.BoundFlags&boundLowerPresent != 0 {
+		fields["lower_bound"] = body.LowerBound
+	}
+	if body.BoundFlags&boundUpperPresent != 0 {
+		fields["upper_bound"] = body.UpperBound
+	}
+	// 0 means pending, fixed at listing, or not available: no time either way.
+	if body.FixingTime != 0 {
+		fields["fixing_time_ns"] = body.FixingTime
+	}
+
+	return applyMeta([]Record{{
+		Type:           "strike_interval",
+		Timestamp:      nsToTime(sendTS),
+		ChannelID:      channelID,
+		SequenceNumber: seq,
+		ResetCount:     reset,
+		InstrumentID:   body.InstrumentID,
+		Symbol:         trimNull(prevDef.Symbol),
+		Fields:         fields,
 	}}, meta)
 }
 

@@ -54,7 +54,7 @@ fn a_handle_the_table_never_held_is_refused_rather_than_resolved() {
 
     let lowering = Lowering::new(source_id());
     let error = lowering
-        .lower_quote(&instruments, forged, 7, present(), SideUpdate::Gone)
+        .lower_quote(&instruments, forged, 7, present(), SideUpdate::Gone, None)
         .expect_err("an unheld handle cannot be lowered");
     assert_eq!(error.reason(), "unknown_instrument");
     assert_eq!(error.field(), None);

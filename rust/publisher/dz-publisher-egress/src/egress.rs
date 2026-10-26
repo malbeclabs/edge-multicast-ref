@@ -66,12 +66,7 @@ struct Open<F: Feed> {
 }
 
 impl<F: Feed> Open<F> {
-    fn push<M: AppMessage>(
-        &mut self,
-        message: &M,
-        message_type: EgressMessageType,
-    ) -> Result<(), EncodeError> {
-        self.builder.push(message)?;
+    fn count(&mut self, message_type: EgressMessageType) {
         match self
             .tally
             .iter_mut()
@@ -80,6 +75,26 @@ impl<F: Feed> Open<F> {
             Some((_, count)) => *count += 1,
             None => self.tally.push((message_type, 1)),
         }
+    }
+
+    fn push_pair<A: AppMessage, B: AppMessage>(
+        &mut self,
+        first: (&A, EgressMessageType),
+        second: (&B, EgressMessageType),
+    ) -> Result<(), EncodeError> {
+        self.builder.push_pair(first.0, second.0)?;
+        self.count(first.1);
+        self.count(second.1);
+        Ok(())
+    }
+
+    fn push<M: AppMessage>(
+        &mut self,
+        message: &M,
+        message_type: EgressMessageType,
+    ) -> Result<(), EncodeError> {
+        self.builder.push(message)?;
+        self.count(message_type);
         Ok(())
     }
 }
@@ -182,6 +197,31 @@ impl<F: Feed, S: DatagramSink> ChannelEgress<F, S> {
         result
     }
 
+    /// Pack two messages that must share a datagram, on a `Channel ID`.
+    ///
+    /// [`push`](Self::push) for a pair a specification forbids dividing, an
+    /// `InstrumentDefinition` and its `StrikeInterval` being the one there is.
+    /// Where the two do not both fit, the open datagram is sent first and the
+    /// pair starts the next one, so no datagram ever ends between them. Neither
+    /// is packed unless both are.
+    ///
+    /// # Errors
+    ///
+    /// As [`push`](Self::push), for either message. Both are dropped.
+    pub fn push_pair<A: AppMessage, B: AppMessage>(
+        &mut self,
+        channel_id: u8,
+        first: (&A, EgressMessageType),
+        second: (&B, EgressMessageType),
+        send_timestamp_ns: u64,
+    ) -> Result<(), EgressError> {
+        let result = self.push_pair_inner(channel_id, first, second, send_timestamp_ns);
+        if let Err(error) = &result {
+            self.record(error);
+        }
+        result
+    }
+
     /// Stamp and send this `Channel ID`'s datagram, if it holds anything.
     ///
     /// A tick that packed nothing sends nothing: `Message Count` has range
@@ -269,6 +309,32 @@ impl<F: Feed, S: DatagramSink> ChannelEgress<F, S> {
             .map_err(EgressError::from)
     }
 
+    /// [`push_inner`](Self::push_inner) for two messages. The same retry, and
+    /// for the same reason: a full datagram is what finishing one is for.
+    fn push_pair_inner<A: AppMessage, B: AppMessage>(
+        &mut self,
+        channel_id: u8,
+        first: (&A, EgressMessageType),
+        second: (&B, EgressMessageType),
+        send_timestamp_ns: u64,
+    ) -> Result<(), EgressError> {
+        let instance = self.endpoint.instance(channel_id);
+        let refused = match self.open_for(instance)?.push_pair(first, second) {
+            Ok(()) => return Ok(()),
+            Err(refused) => refused,
+        };
+        if !matches!(
+            refused,
+            EncodeError::DatagramFull { .. } | EncodeError::MessageCountExhausted { .. }
+        ) {
+            return Err(refused.into());
+        }
+        self.flush_inner(channel_id, send_timestamp_ns)?;
+        self.open_for(instance)?
+            .push_pair(first, second)
+            .map_err(EgressError::from)
+    }
+
     fn flush_inner(&mut self, channel_id: u8, send_timestamp_ns: u64) -> Result<(), EgressError> {
         let Some(open) = self.open.remove(&channel_id) else {
             return Ok(());
@@ -290,6 +356,13 @@ impl<F: Feed, S: DatagramSink> ChannelEgress<F, S> {
         let egress = self.metrics.egress();
         let port_role = self.endpoint.port_role;
         egress.datagram(port_role);
+        // Only a datagram that left. A fan-out answers `Ok` both while its
+        // route is down and when it absorbed a full send buffer with the route
+        // up, and a datagram that went nowhere is not one a packing rate
+        // should count.
+        if self.sink.reached_wire() && self.sink.delivered() {
+            egress.messages_in_datagram(port_role, tally.iter().map(|(_, count)| count).sum());
+        }
         egress.bytes(port_role, datagram.len() as u64);
         for (message_type, count) in tally {
             for _ in 0..count {

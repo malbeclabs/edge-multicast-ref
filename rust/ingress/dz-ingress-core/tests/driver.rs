@@ -456,6 +456,7 @@ impl Adapter for RecordingAdapter {
                     source_count: None,
                 },
                 ask: SideUpdate::Gone,
+                venue_update_id: None,
             });
         }
         Ok(())
@@ -2126,4 +2127,52 @@ fn a_mid_session_write_is_paced_like_a_subscription_at_logon() {
         "the second message waited its slot: {:?}",
         outcome.clock.slept()
     );
+}
+
+#[test]
+fn a_driver_handed_a_sink_that_is_send_is_a_future_that_is_send() {
+    // What a runtime that drives each connection on a worker thread needs, and
+    // a compile-time property: this test fails by not building. The observer
+    // is `Sync`, the clock is, and every other field the future holds across
+    // an await is `Send`, so the sink is what decides.
+    fn spawnable<F: Future + Send>(future: F) -> F {
+        future
+    }
+    let clock = TestClock::new();
+    let observer = TestObserver::default();
+    let mut input = ScriptedInput::new(
+        CONNECTION,
+        Arc::clone(&clock),
+        vec![Connection::live(vec![
+            Read::Payload(b"one"),
+            Read::Ended(DisconnectReason::RemoteClose),
+        ])],
+    );
+    let mut adapter = RecordingAdapter::default();
+    let mut events = RecordingEvents::default();
+    {
+        let mut driver = Driver::new(
+            &mut input,
+            &mut adapter,
+            clock.as_ref(),
+            &observer,
+            policy(),
+        );
+        let _ = block_on(spawnable(driver.run(&mut events)));
+    }
+    assert_eq!(adapter.payloads, vec![(b"one".to_vec(), WALL_NS)]);
+
+    // And a sink behind `dyn`, which is what an inline runtime hands in, is
+    // still accepted.
+    let mut adapter = RecordingAdapter::default();
+    let mut input = ScriptedInput::new(CONNECTION, Arc::clone(&clock), vec![]);
+    let mut driver = Driver::new(
+        &mut input,
+        &mut adapter,
+        clock.as_ref(),
+        &observer,
+        policy(),
+    );
+    let sink: &mut dyn EventSink = &mut events;
+    let _ = block_on(driver.run(sink));
 }

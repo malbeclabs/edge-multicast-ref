@@ -10,7 +10,7 @@ import (
 	"github.com/malbeclabs/edge-multicast-ref/go/internal/golden"
 )
 
-// The golden vectors are the cross-language contract. These five were
+// The golden vectors are the cross-language contract. These six were
 // transcribed by hand from the field tables in edge-feed-spec rather than
 // captured from an encoder; the Rust codec crates assert the same field values
 // against them, and this side reads them with this parser's own decoder.
@@ -38,6 +38,7 @@ import (
 //	source_timestamp_ns -> SourceTimestamp
 //	timestamp_ns        -> Timestamp
 //	expiry_ns           -> Expiry
+//	fixing_time_ns      -> FixingTime
 //
 // Every other field is the manifest's name in Go's capitalisation.
 //
@@ -213,6 +214,25 @@ func goldenVectors() []goldenVector {
 				}, nil
 			},
 		},
+		{
+			// Bound Flags 7 is a lower bound that is present and inclusive and
+			// an upper bound that is present and exclusive, so the two bounds
+			// and the two halves of the flag byte each carry a value of their
+			// own and a decoder exchanging either pair fails.
+			file: "strike-interval-v3.bin", typeID: msgStrikeInterval, size: 40, flags: 0, schema: schemaVersionV3,
+			rows: func(t *testing.T, body []byte) ([]goldenField, []goldenText) {
+				s := decodeGolden[topOfBookStrikeInterval](t, body, msgStrikeInterval, schemaVersionV3)
+				return []goldenField{
+					{Name: "instrument_id", Got: int64(s.InstrumentID), Want: 1},
+					{Name: "source_id", Got: int64(s.SourceID), Want: 2},
+					{Name: "strike_exponent", Got: int64(s.StrikeExponent), Want: -2},
+					{Name: "bound_flags", Got: int64(s.BoundFlags), Want: 7},
+					{Name: "lower_bound", Got: s.LowerBound, Want: 9270000},
+					{Name: "upper_bound", Got: s.UpperBound, Want: 9279999},
+					{Name: "fixing_time_ns", Got: int64(s.FixingTime), Want: 1700000000000000003},
+				}, nil
+			},
+		},
 	}
 }
 
@@ -287,6 +307,53 @@ func TestGoldenInstrumentDefinitionV1(t *testing.T) {
 }
 
 func TestGoldenManifestSummary(t *testing.T) { runGoldenVector(t, "manifest-summary-v3.bin") }
+
+func TestGoldenStrikeInterval(t *testing.T) { runGoldenVector(t, "strike-interval-v3.bin") }
+
+// TestParseDecodesTheStrikeIntervalVector is the strike on the datagram a
+// publisher sends it in: the reference-data supplement puts a StrikeInterval
+// directly behind its InstrumentDefinition. The definition before it and the
+// ManifestSummary after it are the golden vectors too, so the three are real
+// messages at their real lengths, and the two vectors of the pair agree on
+// Instrument ID and Source ID as a publisher's do.
+func TestParseDecodesTheStrikeIntervalVector(t *testing.T) {
+	datagram := buildDatagramWithVersion(schemaVersionV3, 7, 1, 1700000300000000000,
+		goldenBytes(t, "instrument-definition-v3.bin"),
+		goldenBytes(t, "strike-interval-v3.bin"),
+		goldenBytes(t, "manifest-summary-v3.bin"))
+
+	p := NewTopOfBookParser()
+	recs, err := p.Parse(datagram, PacketMeta{})
+	if err != nil {
+		t.Fatalf("a datagram carrying a StrikeInterval failed to parse: %v", err)
+	}
+	if len(recs) != 3 {
+		t.Fatalf("got %d records, want the definition, its strike and the summary: %+v", len(recs), recs)
+	}
+	for i, want := range []string{"instrument_definition", "strike_interval", "manifest_summary"} {
+		if recs[i].Type != want {
+			t.Errorf("record %d is %q, want %q", i, recs[i].Type, want)
+		}
+	}
+	st := recs[1]
+	if st.InstrumentID != 1 || st.Symbol != "BTC-USDT" {
+		t.Errorf("strike record is for instrument %d %q, want 1 BTC-USDT", st.InstrumentID, st.Symbol)
+	}
+	if p.strikesIgnored != 0 {
+		t.Errorf("strikesIgnored = %d, want 0", p.strikesIgnored)
+	}
+	held := p.instruments[1].Strike
+	if held == nil {
+		t.Fatal("the strike was not held on its definition")
+	}
+	want := topOfBookStrikeInterval{
+		InstrumentID: 1, SourceID: 2, StrikeExponent: -2, BoundFlags: 7,
+		LowerBound: 9270000, UpperBound: 9279999, FixingTime: 1700000000000000003,
+	}
+	if *held != want {
+		t.Errorf("held strike = %+v, want %+v", *held, want)
+	}
+}
 
 // ---------------------------------------------------------------------------
 // The manifest, made load-bearing

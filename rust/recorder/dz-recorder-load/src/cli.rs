@@ -23,8 +23,9 @@ Usage:
 Options:
   --config <path>    The TOML configuration. Required.
 
-  --once             Walk the objects directory once, oldest object first, and
-                     exit. This is the mode a timer runs.
+  --once             Walk the objects directory once, oldest object first
+                     within each feed with the feeds taking turns, and exit.
+                     This is the mode a timer runs.
 
   --watch            The same walk, repeated on the configured interval, until a
                      signal arrives. A signal finishes the object being loaded

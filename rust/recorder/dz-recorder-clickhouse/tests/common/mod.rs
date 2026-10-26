@@ -63,6 +63,9 @@ pub struct FakeTransport {
     /// Answers, consumed in order. An exhausted script answers 200, so a test
     /// only scripts the failures it is about.
     answers: RefCell<Vec<Answer>>,
+    /// What [`Transport::concurrency`] reports. Zero is read as one, so the
+    /// derived default is a transport that sends one body at a time.
+    together: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -83,7 +86,17 @@ impl FakeTransport {
         Self {
             sent: RefCell::new(Vec::new()),
             answers: RefCell::new(answers),
+            together: 0,
         }
+    }
+
+    /// The same transport, saying it takes `together` bodies at a time. It still
+    /// sends them one after another: the sink's chunking is what a test of the
+    /// sink is about, and the real overlap is asserted against a socket.
+    #[must_use]
+    pub fn taking(mut self, together: usize) -> Self {
+        self.together = together;
+        self
     }
 
     #[must_use]
@@ -98,6 +111,10 @@ impl FakeTransport {
 }
 
 impl Transport for FakeTransport {
+    fn concurrency(&self) -> usize {
+        self.together.max(1)
+    }
+
     fn post(
         &self,
         url: &str,

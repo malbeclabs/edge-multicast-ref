@@ -31,6 +31,42 @@ type openGroup struct {
 	shard        int
 }
 
+// definitionRef is the InstrumentDefinition the record before this one was, if
+// it was one: enough of it to say whether a StrikeInterval is its pair.
+type definitionRef struct {
+	channelID    uint8
+	port         string
+	seq          uint64
+	msgIndex     uint8
+	instrumentID uint32
+	sourceID     uint16
+}
+
+// pairs reports whether a strike_interval record's message directly follows
+// this definition in the same datagram, for the same instrument.
+//
+// Channel, port and datagram sequence number say it is the same datagram. They
+// do not say the two were neighbours in it: the parser emits no record for a
+// message it skips by its length or drops as malformed, so a definition, a
+// message of a type the parser does not know, and a strike reach this process
+// as two neighbouring records. The message index is what tells them apart. It
+// counts every application message of the datagram, so the strike directly
+// behind a definition is the one whose index is one more.
+func (d *definitionRef) pairs(rec Record) bool {
+	return d != nil &&
+		d.channelID == rec.ChannelID && d.port == rec.Port && d.seq == rec.SequenceNumber &&
+		int(rec.MessageIndex) == int(d.msgIndex)+1 &&
+		d.instrumentID == rec.InstrumentID
+}
+
+// Reasons a strike_interval is ignored, as the label of
+// strike_intervals_ignored_total.
+const (
+	strikeIgnoredNotBehindDefinition = "not_behind_definition"
+	strikeIgnoredSourceID            = "source_id"
+	strikeIgnoredNoDefinition        = "no_definition"
+)
+
 // Coordinator is the single-goroutine Dispatcher. It owns channel-scoped state
 // and routes each record to exactly one shard, or to a broadcast/barrier/fence
 // path. Shards own all instrument-scoped state.
@@ -53,6 +89,13 @@ type Coordinator struct {
 	resetCount map[uint8]uint8 // per channel_id
 	manifest   ManifestState
 	open       map[uint8]openGroup // per channel_id
+
+	// prevDefinition is set while the last record dispatched was an
+	// instrument_definition, and nil otherwise. A StrikeInterval is only its
+	// instrument's strike directly behind that instrument's definition, and
+	// "directly behind" is a statement about the order of every record, which
+	// no shard sees: each receives its own instruments' records only.
+	prevDefinition *definitionRef
 }
 
 func NewCoordinator(ctx context.Context, shards []*Shard, eventsW *EventsWriter, metrics *Metrics) *Coordinator {
@@ -82,6 +125,12 @@ func (c *Coordinator) shardFor(instrumentID uint32) int {
 
 // Dispatch implements Dispatcher. Called synchronously from the book-builder read loop.
 func (c *Coordinator) Dispatch(rec Record) {
+	// Taken and cleared before anything else, so that every path out of here —
+	// the reset barrier's re-entry included — leaves it describing the record
+	// just dispatched and never an older one.
+	prevDefinition := c.prevDefinition
+	c.prevDefinition = nil
+
 	if prev, seen := c.resetCount[rec.ChannelID]; seen && rec.ResetCount != prev {
 		c.runResetBarrier(rec)
 		return
@@ -89,8 +138,40 @@ func (c *Coordinator) Dispatch(rec Record) {
 		c.resetCount[rec.ChannelID] = rec.ResetCount
 	}
 	switch rec.Type {
-	case "level_update", "book_clear", "instrument_definition", "instrument_reset", "trade", "liquidation":
+	case "level_update", "book_clear", "instrument_reset", "trade", "liquidation":
 		c.routeInstrument(rec)
+
+	case "instrument_definition":
+		c.prevDefinition = &definitionRef{
+			channelID:    rec.ChannelID,
+			port:         rec.Port,
+			seq:          rec.SequenceNumber,
+			msgIndex:     rec.MessageIndex,
+			instrumentID: rec.InstrumentID,
+			sourceID:     getUint16(rec.Fields, "source_id"),
+		}
+		c.routeInstrument(rec)
+
+	case "strike_interval":
+		// Strike State rule 5 of the Reference Data supplement: a subscriber
+		// MUST ignore a StrikeInterval that does not immediately follow an
+		// InstrumentDefinition with the same Instrument ID, and one whose
+		// Source ID differs from that definition's. Ignored means it changes
+		// nothing: the strike the shard holds for the instrument, if any, stays.
+		//
+		// The Source ID is compared whatever the schema version. A schema 1
+		// definition carries none and the parser reports 0 for it, so a strike
+		// behind one is held only if it also says 0; the feed lists 0x09 from a
+		// release whose datagrams are schema 3, where the definition always
+		// carries the field.
+		switch {
+		case !prevDefinition.pairs(rec):
+			c.ignoreStrike(strikeIgnoredNotBehindDefinition)
+		case prevDefinition.sourceID != getUint16(rec.Fields, "source_id"):
+			c.ignoreStrike(strikeIgnoredSourceID)
+		default:
+			c.routeInstrument(rec)
+		}
 
 	case "snapshot_begin":
 		idx := c.shardFor(rec.InstrumentID)
@@ -176,12 +257,21 @@ func (c *Coordinator) Dispatch(rec Record) {
 // ahead of every record dispatched after the reconnect.
 func (c *Coordinator) OnDisconnect() {
 	c.open = map[uint8]openGroup{}
+	// The definition before the drop is not the record before whatever the new
+	// connection sends first.
+	c.prevDefinition = nil
 	for i := range c.shards {
 		select {
 		case c.shards[i].inbox <- shardMsg{kind: msgClearShadows}:
 		case <-c.ctx.Done():
 			return
 		}
+	}
+}
+
+func (c *Coordinator) ignoreStrike(reason string) {
+	if c.metrics != nil {
+		c.metrics.StrikeIntervalsIgnoredTotal.WithLabelValues(reason).Inc()
 	}
 }
 

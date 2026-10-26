@@ -20,6 +20,7 @@ fn sample_quote() -> Quote {
         ask_qty: 9876,
         bid_source_count: 4,
         ask_source_count: 5,
+        venue_update_id: 0x4142_4344,
     }
 }
 
@@ -71,7 +72,63 @@ fn quote_fields_land_at_their_spec_offsets() {
         &5u16.to_le_bytes(),
         "offset 54: Ask Source Count"
     );
-    assert_eq!(&b[56..60], &[0, 0, 0, 0], "offset 56: Reserved, 4 bytes");
+    assert_eq!(
+        &b[56..60],
+        &0x4142_4344u32.to_le_bytes(),
+        "offset 56: Venue Update ID"
+    );
+}
+
+#[test]
+fn venue_update_id_defaults_to_zero_and_encodes_as_the_old_padding() {
+    // Every field of the default is zero, the wire's *unavailable*.
+    assert_eq!(Quote::default().venue_update_id, 0);
+    let mut header_only = [0u8; Quote::SIZE];
+    header_only[0] = 0x03;
+    header_only[1] = 60;
+    assert_eq!(encoded(Quote::default()), header_only);
+
+    // A caller that states every field it used to and leaves the new one to
+    // the default writes the four zero bytes the padding always was, and
+    // nothing else moves.
+    let unset = encoded(Quote {
+        venue_update_id: 0,
+        ..sample_quote()
+    });
+    let set = encoded(sample_quote());
+    assert_eq!(
+        &unset[56..60],
+        &[0, 0, 0, 0],
+        "offset 56: zero is unavailable"
+    );
+    assert_eq!(unset[..56], set[..56]);
+}
+
+#[test]
+fn venue_update_id_decodes_from_offset_56_little_endian() {
+    let mut b = encoded(Quote {
+        venue_update_id: 0,
+        ..sample_quote()
+    });
+    b[56..60].copy_from_slice(&[0x01, 0x00, 0x00, 0x80]);
+    assert_eq!(Quote::decode(&b).unwrap().venue_update_id, 0x8000_0001);
+}
+
+#[test]
+fn venue_update_id_round_trips_at_its_extremes() {
+    for id in [1, u32::MAX, 0x8000_0000] {
+        let q = Quote {
+            venue_update_id: id,
+            ..sample_quote()
+        };
+        assert_eq!(Quote::decode(&encoded(q)).unwrap(), q, "{id:#x}");
+    }
+}
+
+fn encoded(q: Quote) -> [u8; Quote::SIZE] {
+    let mut b = [0u8; Quote::SIZE];
+    q.encode_into(&mut b);
+    b
 }
 
 #[test]

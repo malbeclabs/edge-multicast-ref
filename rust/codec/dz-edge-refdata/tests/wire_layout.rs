@@ -2,7 +2,10 @@ use dz_edge_core::{
     AppMessage, ChannelSequence, DatagramBuilder, DecodeError, EncodeError, Feed, Fit, PortRole,
     ResetCount, SCHEMA_VERSION, SCHEMA_VERSION_V1,
 };
-use dz_edge_refdata::{InstrumentDefinition, ManifestSummary, LEG_LEN, SIZE_V1, SYMBOL_LEN};
+use dz_edge_refdata::{
+    InstrumentDefinition, ManifestSummary, StrikeInterval, BOUND_LOWER_INCLUSIVE,
+    BOUND_LOWER_PRESENT, BOUND_UPPER_INCLUSIVE, BOUND_UPPER_PRESENT, LEG_LEN, SIZE_V1, SYMBOL_LEN,
+};
 
 // Refdata's tests cannot name a particular feed - reference data is a
 // supplement adopted by every feed in the family, not tied to any one of
@@ -16,7 +19,8 @@ impl Feed for TestFeed {
     /// anything. A real feed's is the specification's own — see
     /// [`dz_edge_core::Feed::CARRIES`].
     const CARRIES: &'static [u8] = &[
-        0x01, 0x02, 0x03, 0x04, 0x06, 0x07, 0x08, 0x13, 0x14, 0x20, 0x22, 0x40, 0x41, 0x42, 0x7F,
+        0x01, 0x02, 0x03, 0x04, 0x06, 0x07, 0x08, 0x09, 0x13, 0x14, 0x20, 0x22, 0x40, 0x41, 0x42,
+        0x7F,
     ];
 }
 
@@ -418,4 +422,352 @@ fn an_instrument_definition_pushed_into_a_mktdata_builder_is_a_countable_error()
             role: "mktdata",
         }
     );
+}
+
+// ---------------------------------------------------------------------------
+// StrikeInterval
+// ---------------------------------------------------------------------------
+
+const LOWER: u8 = BOUND_LOWER_PRESENT;
+const LOWER_INCL: u8 = BOUND_LOWER_PRESENT | BOUND_LOWER_INCLUSIVE;
+const UPPER: u8 = BOUND_UPPER_PRESENT;
+const UPPER_INCL: u8 = BOUND_UPPER_PRESENT | BOUND_UPPER_INCLUSIVE;
+
+/// "At or above 92,700.00 and below 92,799.99", fixed at a time the venue gave.
+fn strike() -> StrikeInterval {
+    StrikeInterval {
+        instrument_id: 42,
+        source_id: 7,
+        strike_exponent: -2,
+        bound_flags: LOWER_INCL | UPPER,
+        lower_bound: 9_270_000,
+        upper_bound: 9_279_999,
+        fixing_time_ns: 1_700_000_000_000_000_000,
+    }
+}
+
+/// A strike with these flags and bounds, and nothing else about it in question.
+fn with(bound_flags: u8, lower_bound: i64, upper_bound: i64) -> StrikeInterval {
+    StrikeInterval {
+        bound_flags,
+        lower_bound,
+        upper_bound,
+        fixing_time_ns: 0,
+        ..strike()
+    }
+}
+
+#[test]
+fn strike_interval_fields_land_at_their_spec_offsets() {
+    let mut b = [0xFFu8; StrikeInterval::SIZE];
+    strike().encode_into(&mut b);
+
+    assert_eq!(b.len(), 40);
+    assert_eq!(b[0], 0x09, "offset 0: Type");
+    assert_eq!(b[1], 40, "offset 1: Length");
+    assert_eq!(&b[2..4], &[0, 0], "offset 2: Flags");
+    assert_eq!(&b[4..8], &42u32.to_le_bytes(), "offset 4: Instrument ID");
+    assert_eq!(&b[8..10], &7u16.to_le_bytes(), "offset 8: Source ID");
+    assert_eq!(b[10], (-2i8) as u8, "offset 10: Strike Exponent");
+    assert_eq!(b[11], 0b0111, "offset 11: Bound Flags");
+    assert_eq!(
+        &b[12..20],
+        &9_270_000i64.to_le_bytes(),
+        "offset 12: Lower Bound"
+    );
+    assert_eq!(
+        &b[20..28],
+        &9_279_999i64.to_le_bytes(),
+        "offset 20: Upper Bound"
+    );
+    assert_eq!(
+        &b[28..36],
+        &1_700_000_000_000_000_000u64.to_le_bytes(),
+        "offset 28: Fixing Time"
+    );
+    assert_eq!(
+        &b[36..40],
+        &[0; 4],
+        "offset 36: Reserved, zeroed over whatever the buffer held"
+    );
+}
+
+#[test]
+fn strike_interval_round_trips() {
+    let mut b = [0u8; StrikeInterval::SIZE];
+    strike().encode_into(&mut b);
+    assert_eq!(StrikeInterval::decode(&b).unwrap(), strike());
+}
+
+#[test]
+fn a_negative_bound_and_a_positive_exponent_survive_the_round_trip() {
+    // A settlement value can be below zero, a temperature for one, and a venue
+    // can state a strike in thousands.
+    let s = StrikeInterval {
+        strike_exponent: 3,
+        ..with(LOWER_INCL | UPPER_INCL, -15, -2)
+    };
+    let mut b = [0u8; StrikeInterval::SIZE];
+    s.encode_into(&mut b);
+    assert_eq!(StrikeInterval::decode(&b).unwrap(), s);
+}
+
+/// Every row of the specification's `Bound Flags` table, and the three other
+/// values it names as valid.
+#[test]
+fn every_bound_flags_value_the_specification_lists_is_sendable() {
+    for (flags, lower, upper, pays) in [
+        (0b0001, 100, 0, "v > Lower Bound"),
+        (0b0011, 100, 0, "v >= Lower Bound"),
+        (0b0100, 0, 200, "v < Upper Bound"),
+        (0b1100, 0, 200, "v <= Upper Bound"),
+        (0b1111, 100, 200, "Lower Bound <= v <= Upper Bound"),
+        (0b0101, 100, 200, "Lower Bound < v < Upper Bound"),
+        (0b0111, 100, 200, "Lower Bound <= v < Upper Bound"),
+        (0b1101, 100, 200, "Lower Bound < v <= Upper Bound"),
+    ] {
+        let s = with(flags, lower, upper);
+        assert_eq!(s.defect(), None, "{flags:#06b}: {pays}");
+        assert_eq!(s.validate(), Ok(()), "{flags:#06b}: {pays}");
+        assert!(!s.is_pending(), "{flags:#06b}: {pays}");
+    }
+}
+
+#[test]
+fn a_pending_strike_has_no_bound_and_no_fixing_time() {
+    let s = StrikeInterval::pending(42, 7, -2);
+    assert!(s.is_pending());
+    assert_eq!(s.validate(), Ok(()));
+    assert_eq!(
+        (
+            s.bound_flags,
+            s.lower_bound,
+            s.upper_bound,
+            s.fixing_time_ns
+        ),
+        (0, 0, 0, 0)
+    );
+    assert_eq!(
+        (s.instrument_id, s.source_id, s.strike_exponent),
+        (42, 7, -2)
+    );
+}
+
+#[test]
+fn a_point_is_an_interval_with_equal_inclusive_bounds() {
+    assert_eq!(with(LOWER_INCL | UPPER_INCL, 9, 9).validate(), Ok(()));
+}
+
+/// `STRIKE.FIELDS`: the fields agree with `Bound Flags`.
+#[test]
+fn fields_that_disagree_with_bound_flags_are_refused() {
+    let pending_with_a_time = StrikeInterval {
+        fixing_time_ns: 1,
+        ..with(0, 0, 0)
+    };
+    for (what, s) in [
+        ("a reserved bit", with(LOWER | 0b0001_0000, 100, 0)),
+        ("the top reserved bit", with(LOWER | 0b1000_0000, 100, 0)),
+        (
+            "lower inclusive, not present",
+            with(BOUND_LOWER_INCLUSIVE | UPPER, 0, 200),
+        ),
+        (
+            "upper inclusive, not present",
+            with(LOWER | BOUND_UPPER_INCLUSIVE, 100, 0),
+        ),
+        ("a lower bound that is not present", with(UPPER, 100, 200)),
+        ("an upper bound that is not present", with(LOWER, 100, 200)),
+        ("a bound on a pending strike", with(0, 100, 0)),
+        ("a fixing time on a pending strike", pending_with_a_time),
+    ] {
+        assert!(s.defect().is_some(), "{what}");
+        assert!(
+            matches!(s.validate(), Err(EncodeError::MalformedMessage { .. })),
+            "{what}: {:?}",
+            s.validate()
+        );
+    }
+}
+
+/// `STRIKE.INTERVAL_NOT_EMPTY`: with both bounds present, some value is inside.
+#[test]
+fn an_empty_interval_is_refused() {
+    for (what, s) in [
+        ("lower above upper", with(LOWER_INCL | UPPER_INCL, 201, 200)),
+        ("equal, both exclusive", with(LOWER | UPPER, 200, 200)),
+        ("equal, lower exclusive", with(LOWER | UPPER_INCL, 200, 200)),
+        ("equal, upper exclusive", with(LOWER_INCL | UPPER, 200, 200)),
+    ] {
+        assert!(
+            matches!(s.validate(), Err(EncodeError::MalformedMessage { .. })),
+            "{what}: {:?}",
+            s.validate()
+        );
+    }
+}
+
+#[test]
+fn the_builder_refuses_a_strike_whose_fields_disagree() {
+    let channel = ChannelSequence::new(0, ResetCount(0));
+    let mut b = DatagramBuilder::<TestFeed>::new(channel, PortRole::Refdata, 1232);
+    let err = b.push(&with(UPPER, 100, 200)).unwrap_err();
+    assert_eq!(
+        err,
+        EncodeError::MalformedMessage {
+            message: core::any::type_name::<StrikeInterval>(),
+            what: "Lower Bound must be 0 when it is not present",
+        }
+    );
+    assert!(b.is_empty(), "a refused message leaves nothing behind");
+}
+
+/// A reader meets bytes somebody else encoded. The specification gives it one
+/// rule for every `Bound Flags` value and tells it to ignore the reserved bits,
+/// so a body that breaks a publisher rule decodes, and `defect` says what is
+/// wrong with it.
+#[test]
+fn a_strike_that_breaks_a_publisher_rule_still_decodes() {
+    let sent = with(LOWER | 0b1000_0000, 100, 0);
+    let mut b = [0u8; StrikeInterval::SIZE];
+    sent.encode_into(&mut b);
+
+    let read = StrikeInterval::decode(&b).unwrap();
+    assert_eq!(read, sent);
+    assert!(read.defect().is_some());
+    assert!(
+        !read.is_pending(),
+        "the presence bits are read on their own"
+    );
+}
+
+#[test]
+fn a_reserved_bit_does_not_make_a_pending_strike_fixed() {
+    assert!(with(0b1111_0000, 0, 0).is_pending());
+}
+
+#[test]
+fn strike_interval_decode_rejects_a_buffer_shorter_than_the_fixed_size() {
+    let mut b = [0u8; StrikeInterval::SIZE];
+    strike().encode_into(&mut b);
+    assert_eq!(
+        StrikeInterval::decode(&b[..39]),
+        Err(DecodeError::ShortBuffer { need: 40, got: 39 })
+    );
+}
+
+#[test]
+fn strike_interval_decode_rejects_a_declared_length_that_is_not_the_fixed_size() {
+    let mut b = [0u8; StrikeInterval::SIZE];
+    strike().encode_into(&mut b);
+    b[1] = 24;
+    assert_eq!(
+        StrikeInterval::decode(&b),
+        Err(DecodeError::LengthMismatch {
+            type_id: 0x09,
+            declared: 24,
+            expected: 40,
+        })
+    );
+}
+
+#[test]
+fn strike_interval_decode_rejects_a_type_id_that_is_not_its_own() {
+    let mut b = [0u8; StrikeInterval::SIZE];
+    strike().encode_into(&mut b);
+    b[0] = 0x07;
+    assert_eq!(
+        StrikeInterval::decode(&b),
+        Err(DecodeError::BadTypeId(0x07))
+    );
+}
+
+#[test]
+fn a_strike_interval_pushed_into_a_mktdata_builder_is_a_countable_error() {
+    let channel = ChannelSequence::new(0, ResetCount(0));
+    let mut b = DatagramBuilder::<TestFeed>::new(channel, PortRole::Mktdata, 1232);
+    assert_eq!(
+        b.push(&strike()).unwrap_err(),
+        EncodeError::WrongPortRole {
+            message: core::any::type_name::<StrikeInterval>(),
+            role: "mktdata",
+        }
+    );
+}
+
+/// The pair the specification describes: a definition and its strike are 170
+/// bytes, and a datagram of the maximum size holds seven of them.
+#[test]
+fn seven_pairs_fill_a_datagram_and_an_eighth_does_not_fit() {
+    let channel = ChannelSequence::new(0, ResetCount(0));
+    let mut b = DatagramBuilder::<TestFeed>::new(channel, PortRole::Refdata, 1232);
+    for _ in 0..7 {
+        b.push(&sample()).unwrap();
+        b.push(&strike()).unwrap();
+    }
+    assert_eq!(b.remaining(), 1232 - 24 - 7 * 170);
+    assert!(
+        matches!(b.push(&sample()), Err(EncodeError::DatagramFull { .. })),
+        "18 bytes remain, and a definition is 130"
+    );
+
+    let out = b.finish(0).expect("datagram has messages");
+    let datagram = dz_edge_core::Datagram::decode(&out, TestFeed::MAGIC).unwrap();
+    let types: Vec<u8> = datagram.messages().map(|m| m.type_id).collect();
+    assert_eq!(types, [0x02, 0x09].repeat(7));
+}
+
+/// What two separate pushes get wrong: after three bare definitions and four
+/// pairs a definition still fits and its strike does not. The pair is refused
+/// whole, and the builder is as it was.
+#[test]
+fn a_pair_whose_strike_does_not_fit_is_refused_whole() {
+    let channel = ChannelSequence::new(0, ResetCount(0));
+    let mut b = DatagramBuilder::<TestFeed>::new(channel, PortRole::Refdata, 1232);
+    for _ in 0..3 {
+        b.push(&sample()).unwrap();
+    }
+    for _ in 0..4 {
+        b.push_pair(&sample(), &strike()).unwrap();
+    }
+    assert_eq!(
+        b.remaining(),
+        138,
+        "room for a definition, not for the pair"
+    );
+
+    assert_eq!(
+        b.push_pair(&sample(), &strike()),
+        Err(EncodeError::DatagramFull {
+            attempted: 1094 + 170,
+            capacity: 1232,
+        })
+    );
+    assert_eq!(b.remaining(), 138, "the definition was not written either");
+
+    let out = b.finish(0).expect("datagram has messages");
+    let datagram = dz_edge_core::Datagram::decode(&out, TestFeed::MAGIC).unwrap();
+    assert_eq!(datagram.messages().len(), 11);
+}
+
+#[test]
+fn a_pair_whose_strike_is_malformed_writes_neither_message() {
+    let channel = ChannelSequence::new(0, ResetCount(0));
+    let mut b = DatagramBuilder::<TestFeed>::new(channel, PortRole::Refdata, 1232);
+    assert!(matches!(
+        b.push_pair(&sample(), &with(UPPER, 100, 200)),
+        Err(EncodeError::MalformedMessage { .. })
+    ));
+    assert!(b.is_empty());
+}
+
+#[test]
+fn a_pair_on_a_port_role_one_of_them_may_not_use_writes_neither_message() {
+    let channel = ChannelSequence::new(0, ResetCount(0));
+    let mut b = DatagramBuilder::<TestFeed>::new(channel, PortRole::Mktdata, 1232);
+    assert!(matches!(
+        b.push_pair(&sample(), &strike()),
+        Err(EncodeError::WrongPortRole { .. })
+    ));
+    assert!(b.is_empty());
 }

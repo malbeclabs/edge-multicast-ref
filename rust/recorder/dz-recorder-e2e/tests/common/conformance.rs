@@ -39,6 +39,7 @@
 //! A submodule of `common` rather than a suite of its own: it holds no tests,
 //! and every suite that validates a chain reaches it through the same helpers.
 
+use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
 use super::{port_of, Recorded, ALL_ROLES, GROUP};
@@ -123,26 +124,65 @@ fn replayed_with_provenance(archive: &Recorded) -> (Vec<OwnedDatagram>, SectionP
 /// Replays the archive, writes it back out as a segment and runs the tool over
 /// it.
 pub fn conformance_of(archive: &Recorded, feed: &str) -> Verdict {
+    let mut ports = PortRoles::none();
+    for role in ALL_ROLES {
+        ports = ports.with(*role, port_of(*role));
+    }
+    judged(archive, feed, GROUP, ports, false).0
+}
+
+/// The same over a stated group and stated ports, with the tool's own JSON
+/// report beside the verdict.
+///
+/// For a capture this crate's fixed ports do not describe: a publisher composed
+/// by the runtime sends where its `[[feed]]` blocks say, and a tool pointed at
+/// other ports would evaluate nothing and exit 0.
+///
+/// The report is returned as the tool wrote it and read by the caller, because
+/// an exit code and a log line say that no rule found a violation and neither
+/// says how many times a rule looked. A rule that passed over zero opportunities
+/// and a rule that passed over forty are the same exit code.
+pub fn conformance_reported(
+    archive: &Recorded,
+    feed: &str,
+    group: Ipv4Addr,
+    ports: PortRoles,
+) -> (Verdict, serde_json::Value) {
+    let (verdict, report) = judged(archive, feed, group, ports, true);
+    let report = report.unwrap_or_else(|| {
+        panic!(
+            "dz-conformance exited {} and wrote no report:\n{}",
+            verdict.code, verdict.stderr
+        )
+    });
+    let report = serde_json::from_str(&report)
+        .unwrap_or_else(|e| panic!("the tool's report is not JSON: {e}: {report}"));
+    (verdict, report)
+}
+
+fn judged(
+    archive: &Recorded,
+    feed: &str,
+    group: Ipv4Addr,
+    ports: PortRoles,
+    reported: bool,
+) -> (Verdict, Option<String>) {
     let dir = tempfile::tempdir().expect("a temporary directory");
     let (datagrams, provenance) = replayed_with_provenance(archive);
     let segments = write_group_segments(dir.path(), &datagrams, &provenance)
         .expect("the bridge writes a segment");
 
-    // One group throughout this crate, so one invocation. The bridge writes one
-    // file per group because the tool's port map is keyed on the destination
-    // port alone, and a second file here would mean a second group nobody in
-    // this suite joined.
+    // One group per archive throughout this crate, so one invocation. The
+    // bridge writes one file per group because the tool's port map is keyed on
+    // the destination port alone, and a second file here would mean a second
+    // group nobody in this suite joined.
     assert_eq!(
         segments.iter().map(|s| s.group).collect::<Vec<_>>(),
-        vec![GROUP],
+        vec![group],
         "these fixtures publish to one group, and the tool judges one at a time"
     );
 
-    let mut ports = PortRoles::none();
-    for role in ALL_ROLES {
-        ports = ports.with(*role, port_of(*role));
-    }
-
+    let report_path = dir.path().join("report.json");
     let run = ConformanceTool::new(tool(), dir.path())
         .run(
             &Invocation {
@@ -151,12 +191,18 @@ pub fn conformance_of(archive: &Recorded, feed: &str) -> Verdict {
                 feed,
                 ports,
             },
-            None,
+            reported.then_some(report_path.as_path()),
         )
         .expect("the conformance tool runs");
 
-    Verdict {
-        code: run.code.expect("the tool was not signalled"),
-        stderr: run.stderr,
-    }
+    let report = reported
+        .then(|| std::fs::read_to_string(&report_path).ok())
+        .flatten();
+    (
+        Verdict {
+            code: run.code.expect("the tool was not signalled"),
+            stderr: run.stderr,
+        },
+        report,
+    )
 }

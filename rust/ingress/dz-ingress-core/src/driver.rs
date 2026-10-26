@@ -187,19 +187,19 @@ impl UpstreamSink for UpstreamQueue {
 /// here. Attribution is the driver's reading of its own clock, or the
 /// transport's, and there is no path by which an adapter's guess can be
 /// recorded as one.
-struct PayloadSink<'a> {
-    inner: &'a mut dyn EventSink,
+struct PayloadSink<'a, E: EventSink + ?Sized> {
+    inner: &'a mut E,
     observer: &'a dyn IngressObserver,
     connection: &'static str,
 }
 
-impl<'a> PayloadSink<'a> {
+impl<'a, E: EventSink + ?Sized> PayloadSink<'a, E> {
     /// Open the scope for one payload and hand back the sink for it.
     ///
     /// The stamp is stated *before* the adapter can write anything, so the
     /// first event of the payload is as attributable as the last.
     fn open(
-        inner: &'a mut dyn EventSink,
+        inner: &'a mut E,
         observer: &'a dyn IngressObserver,
         connection: &'static str,
         recv_ts_ns: u64,
@@ -213,7 +213,7 @@ impl<'a> PayloadSink<'a> {
     }
 }
 
-impl Drop for PayloadSink<'_> {
+impl<E: EventSink + ?Sized> Drop for PayloadSink<'_, E> {
     /// Close the scope.
     ///
     /// In `Drop` rather than at the end of the driver's own block so that there
@@ -226,7 +226,7 @@ impl Drop for PayloadSink<'_> {
     }
 }
 
-impl EventSink for PayloadSink<'_> {
+impl<E: EventSink + ?Sized> EventSink for PayloadSink<'_, E> {
     fn upstream_message(&mut self, message_type: &'static str) {
         self.observer.message(message_type, self.connection);
         self.inner.upstream_message(message_type);
@@ -410,7 +410,14 @@ impl<'a> Driver<'a> {
     /// the venue keeps doing it. That is the shape of a throttle that lets one
     /// payload through, and it is the rate to size a per-address budget
     /// against, not the one at the maximum.
-    pub async fn run(&mut self, events: &mut dyn EventSink) -> IngressError {
+    ///
+    /// # Generic over the sink, so the future can be `Send`
+    ///
+    /// `&mut dyn EventSink` is accepted as it always was. A caller that hands
+    /// in a sink that is `Send` gets a future that is `Send` too, which is what
+    /// a runtime driving each connection on a worker thread needs: every other
+    /// field the future holds across an await already is.
+    pub async fn run<E: EventSink + ?Sized>(&mut self, events: &mut E) -> IngressError {
         loop {
             match self.cycle(events).await {
                 Cycle::Fatal(error) => return error,
@@ -430,7 +437,7 @@ impl<'a> Driver<'a> {
     }
 
     /// One connect, subscribe and receive.
-    async fn cycle(&mut self, events: &mut dyn EventSink) -> Cycle {
+    async fn cycle<E: EventSink + ?Sized>(&mut self, events: &mut E) -> Cycle {
         let connection = self.input.connection();
 
         match self.input.connect(self.policy.connect_timeout).await {
@@ -547,7 +554,11 @@ impl<'a> Driver<'a> {
     ///
     /// Returns why, and whether this connection ever delivered a payload —
     /// which is the evidence the delay sequence resets on.
-    async fn pump(&mut self, events: &mut dyn EventSink, connection: ConnectionId) -> (Stop, bool) {
+    async fn pump<E: EventSink + ?Sized>(
+        &mut self,
+        events: &mut E,
+        connection: ConnectionId,
+    ) -> (Stop, bool) {
         let mut delivered = false;
         let mut last_payload_ns = self.clock.steady_ns();
         // From now rather than from zero, so the first ask is one cadence after

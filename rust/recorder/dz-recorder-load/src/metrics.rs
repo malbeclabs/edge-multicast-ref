@@ -116,14 +116,29 @@ pub enum SkipReason {
     /// under a poll interval far shorter than `insert_max_delay` that is most
     /// of the passes an object is alive for.
     Held,
+    /// Its manifest was gone when the pass came to load it, though the scan
+    /// had read it: evicted under the staging budget in between. The objects a
+    /// back-load takes first are the oldest, which are the ones closest to
+    /// eviction, so this is how a loader losing that race shows up object by
+    /// object, beside the lag metrics that measure it.
+    Evicted,
+    /// Its manifest was gone before the scan could read it: evicted under the
+    /// staging budget after the walk listed it. Not [`Evicted`](Self::Evicted),
+    /// because with no manifest there is no ledger key to ask, so whether the
+    /// object had been loaded is unknown -- and on a caught-up loader it almost
+    /// always had. A loader falling behind shows this beside a growing
+    /// `oldest_unloaded_age_seconds`; one that is caught up shows it alone.
+    Vanished,
 }
 
 impl SkipReason {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 6] = [
         Self::AlreadyLoaded,
         Self::ForeignHost,
         Self::Unpaired,
         Self::Held,
+        Self::Evicted,
+        Self::Vanished,
     ];
 
     #[must_use]
@@ -133,6 +148,8 @@ impl SkipReason {
             Self::ForeignHost => "foreign_host",
             Self::Unpaired => "unpaired",
             Self::Held => "held",
+            Self::Evicted => "evicted",
+            Self::Vanished => "vanished",
         }
     }
 }
@@ -217,7 +234,8 @@ impl LoaderMetrics {
             bytes_written_total: counter(
                 &registry,
                 "dz_loader_bytes_written_total",
-                "Row bytes put on the wire, summed per request. Per request and not per \
+                "Row bytes as serialized, before the request body is compressed, summed \
+                 per request. Per request and not per \
                  object: an insert spans objects, so the rows of several of them have one \
                  length between them and dividing it up would be inventing a number.",
                 &labels,
@@ -379,7 +397,8 @@ impl LoaderMetrics {
         }
     }
 
-    /// Bytes one request put on the wire.
+    /// Bytes of rows one request sent, as serialized and before the transport
+    /// compressed them.
     ///
     /// Counted per request and never per object, which is why it is not part of
     /// [`object_loaded`](Self::object_loaded): once an insert spans objects the

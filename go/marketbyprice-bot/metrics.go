@@ -60,6 +60,10 @@ type Metrics struct {
 	MalformedDeltasTotal  *prometheus.CounterVec // label: reason
 	InstrumentResetsTotal *prometheus.CounterVec // label: reason
 	ChannelResetsTotal    prometheus.Counter
+	// StrikeIntervalsIgnoredTotal counts strike_interval records the spec tells
+	// a subscriber to ignore. A conforming publisher sends none, so any count is
+	// a publisher defect, or a parser that reordered a datagram's records.
+	StrikeIntervalsIgnoredTotal *prometheus.CounterVec // label: reason
 
 	// ClickHouse persistence. Populated through metricsObserver, which adapts
 	// the shared internal/clickhouse client's Observer interface onto these.
@@ -118,6 +122,10 @@ func NewMetrics(version, commit string) *Metrics {
 	}, []string{"reason"})
 	m.InstrumentResetsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "instrument_resets_total"}, []string{"reason"})
 	m.ChannelResetsTotal = prometheus.NewCounter(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "channel_resets_total"})
+	m.StrikeIntervalsIgnoredTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricsNamespace, Name: "strike_intervals_ignored_total",
+		Help: "StrikeInterval records ignored and not held as an instrument's strike: not directly behind the InstrumentDefinition of the same instrument in the same datagram, or carrying a Source ID that definition does not. A publisher defect.",
+	}, []string{"reason"})
 
 	m.ClickhouseRowsWritten = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "clickhouse_rows_written_total"}, []string{"table"})
 	m.ClickhouseRowsDropped = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "clickhouse_rows_dropped_total"}, []string{"table", "reason"})
@@ -146,6 +154,7 @@ func NewMetrics(version, commit string) *Metrics {
 		m.DeltaBufferOverflowTotal, m.DeltaBufferedRecords,
 		m.SnapshotDiscardedTotal, m.SnapshotLevelDroppedTotal, m.DeltasDiscardedTotal,
 		m.PerInstrumentGapsTotal, m.MalformedDeltasTotal, m.InstrumentResetsTotal, m.ChannelResetsTotal,
+		m.StrikeIntervalsIgnoredTotal,
 		m.ClickhouseRowsWritten, m.ClickhouseRowsDropped, m.ClickhouseWriteErrors,
 		m.ClickhouseBatchDuration, m.ClickhouseBufferedRows,
 		m.SnapshotWritesTotal, m.SnapshotCoalescesTotal, m.SnapshotLagMs,
