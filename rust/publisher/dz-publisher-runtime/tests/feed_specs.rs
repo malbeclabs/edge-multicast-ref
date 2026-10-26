@@ -54,6 +54,27 @@ fn the_supported_list_is_the_specification_set() {
 }
 
 #[test]
+fn every_feed_takes_the_settle_type_rule_the_dated_future_refusal_applies() {
+    // `dz-publisher-refdata` refuses a dated future with no `Settle Type` at
+    // admission, before any feed sees it, because top-of-book requires cash or
+    // physical for `Asset Class` `6` and market-by-price follows it. The
+    // midpoint feed fixes `Settle Type` at `0` and binds only the expiry, so a
+    // midpoint send path would be refused every dated future it could carry.
+    // The match is exhaustive on purpose: a feed added to `FeedSpec` does not
+    // compile here until someone says which rule it takes.
+    for spec in FeedSpec::ALL {
+        let requires_settle_type = match spec {
+            FeedSpec::TopOfBook | FeedSpec::MarketByPrice => true,
+        };
+        assert!(
+            requires_settle_type,
+            "{} binds only the expiry",
+            spec.as_str()
+        );
+    }
+}
+
+#[test]
 fn the_type_level_specification_agrees_with_the_value() {
     // `EmittedFeed::SPEC` is what the routing reads, and it exists so the feed
     // and the specification cannot disagree — the codec will not stop a `Quote`

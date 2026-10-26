@@ -82,7 +82,8 @@ pub enum Refusal {
     /// The venue stated a dated future without an expiry, or without a settle
     /// type.
     ///
-    /// The specification requires both for `Asset Class` `6`. Published
+    /// Top-of-book requires both for `Asset Class` `6`, and market-by-price
+    /// and market-by-order take the value as top-of-book defines it. Published
     /// without them, the definition reads to a subscriber as a contract that
     /// never expires, or as one whose settlement means nothing. That is wrong
     /// in a way nothing downstream detects, so the instrument is not admitted.

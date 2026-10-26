@@ -112,6 +112,14 @@ pub fn compose(
     instrument_id: u32,
     source_id: SourceId,
 ) -> Result<Composition, Refusal> {
+    // Top-of-book's rule for `Asset Class` `6`, which market-by-price and
+    // market-by-order follow: a non-zero `Expiry`, and `Settle Type` cash or
+    // physical. The midpoint feed fixes `Settle Type` at `0` and binds only
+    // the expiry, so this check is right only while every feed this
+    // workspace can emit takes the top-of-book rule. `FeedSpec` is closed
+    // over top-of-book and market-by-price today. A midpoint send path would
+    // need the settle-type half scoped to the feed, and `dz-publisher-runtime`'s
+    // `tests/feed_specs.rs` does not compile until a new feed makes that choice.
     if spec.asset_class == AssetClass::DatedFuture
         && (spec.expiry_ns.is_none_or(|expiry| expiry == 0)
             || spec.settle_type == SettleType::NotApplicable)
