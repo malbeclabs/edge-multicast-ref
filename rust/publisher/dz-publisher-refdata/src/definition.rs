@@ -4,11 +4,12 @@
 use dz_adapter_core::{AssetClass, InstrumentSpec, MarketModel, PriceBound, SettleType};
 use dz_edge_core::Fit;
 use dz_edge_refdata::{
-    InstrumentDefinition, ASSET_CLASS_CRYPTO_SPOT, ASSET_CLASS_PERPETUAL_FUTURE,
-    ASSET_CLASS_PREDICTION_BINARY, ASSET_CLASS_PREDICTION_CATEGORICAL,
-    ASSET_CLASS_PREDICTION_SCALAR, ASSET_CLASS_UNKNOWN, LEG_LEN, MARKET_MODEL_AMM,
-    MARKET_MODEL_CLOB, MARKET_MODEL_UNKNOWN, PRICE_BOUND_NON_NEGATIVE, PRICE_BOUND_UNBOUNDED,
-    PRICE_BOUND_UNIT_INTERVAL, SETTLE_TYPE_CASH, SETTLE_TYPE_NA, SETTLE_TYPE_PHYSICAL, SYMBOL_LEN,
+    InstrumentDefinition, ASSET_CLASS_CRYPTO_SPOT, ASSET_CLASS_DATED_FUTURE,
+    ASSET_CLASS_PERPETUAL_FUTURE, ASSET_CLASS_PREDICTION_BINARY,
+    ASSET_CLASS_PREDICTION_CATEGORICAL, ASSET_CLASS_PREDICTION_SCALAR, ASSET_CLASS_UNKNOWN,
+    LEG_LEN, MARKET_MODEL_AMM, MARKET_MODEL_CLOB, MARKET_MODEL_UNKNOWN, PRICE_BOUND_NON_NEGATIVE,
+    PRICE_BOUND_UNBOUNDED, PRICE_BOUND_UNIT_INTERVAL, SETTLE_TYPE_CASH, SETTLE_TYPE_NA,
+    SETTLE_TYPE_PHYSICAL, SYMBOL_LEN,
 };
 use dz_publisher_lowering::{
     price_for, qty_at, qty_for, ContractSize, Instrument, LoweringError, SourceId,
@@ -111,6 +112,20 @@ pub fn compose(
     instrument_id: u32,
     source_id: SourceId,
 ) -> Result<Composition, Refusal> {
+    // Top-of-book's rule for `Asset Class` `6`, which market-by-price and
+    // market-by-order follow: a non-zero `Expiry`, and `Settle Type` cash or
+    // physical. The midpoint feed fixes `Settle Type` at `0` and binds only
+    // the expiry, so this check is right only while every feed this
+    // workspace can emit takes the top-of-book rule. `FeedSpec` is closed
+    // over top-of-book and market-by-price today. A midpoint send path would
+    // need the settle-type half scoped to the feed, and `dz-publisher-runtime`'s
+    // `tests/feed_specs.rs` does not compile until a new feed makes that choice.
+    if spec.asset_class == AssetClass::DatedFuture
+        && (spec.expiry_ns.is_none_or(|expiry| expiry == 0)
+            || spec.settle_type == SettleType::NotApplicable)
+    {
+        return Err(Refusal::DatedFutureTerms);
+    }
     let quoted_per_contract = match spec.quoted_per_contract {
         None => None,
         Some(stated) => Some(ContractSize::from_scalar(stated).ok_or(Refusal::ContractSize)?),
@@ -208,6 +223,7 @@ const fn asset_class_byte(asset_class: AssetClass) -> u8 {
         AssetClass::PredictionScalar => ASSET_CLASS_PREDICTION_SCALAR,
         AssetClass::PredictionCategorical => ASSET_CLASS_PREDICTION_CATEGORICAL,
         AssetClass::PerpetualFuture => ASSET_CLASS_PERPETUAL_FUTURE,
+        AssetClass::DatedFuture => ASSET_CLASS_DATED_FUTURE,
     }
 }
 
