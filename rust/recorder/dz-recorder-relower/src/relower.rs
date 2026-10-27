@@ -438,10 +438,15 @@ impl EventSink for Collector<'_> {
                 source_ts_ns,
                 bid,
                 ask,
-            } => match self
-                .tob
-                .lower_quote(self.table, instrument, source_ts_ns, bid, ask)
-            {
+                venue_update_id,
+            } => match self.tob.lower_quote(
+                self.table,
+                instrument,
+                source_ts_ns,
+                bid,
+                ask,
+                venue_update_id,
+            ) {
                 Ok(quote) => self.keep(MessageBody::Quote(quote)),
                 Err(error) => self.refuse("Quote", instrument, error),
             },

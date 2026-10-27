@@ -56,6 +56,18 @@ const KIND_QUOTE: u8 = 1;
 const KIND_TRADE: u8 = 2;
 const KIND_LEVEL: u8 = 3;
 const KIND_CLEAR: u8 = 4;
+/// A quote that carries the venue's update counter: [`KIND_QUOTE`]'s body
+/// followed by the counter as a `u64`.
+///
+/// **A kind of its own rather than a field in [`KIND_QUOTE`]'s body**, so that
+/// nothing already written changes. A quote with no counter is written as it
+/// always was, byte for byte, and a writer in another language that never
+/// states one needs no change at all. A reader that predates the field reports
+/// this kind as one it does not know, which the length prefix makes
+/// skippable, rather than as a malformed quote, which would not be. The
+/// alternative, a presence tag appended to every quote under a new
+/// [`VERSION`], would have rewritten every existing record to say nothing new.
+const KIND_QUOTE_UPDATE_ID: u8 = 5;
 
 const SCALAR_TEXT: u8 = 0;
 const SCALAR_FIXED: u8 = 1;
@@ -332,6 +344,14 @@ pub fn decode<'a>(
             source_ts_ns,
             bid: r.side_update()?,
             ask: r.side_update()?,
+            venue_update_id: None,
+        },
+        KIND_QUOTE_UPDATE_ID => Event::Quote {
+            instrument,
+            source_ts_ns,
+            bid: r.side_update()?,
+            ask: r.side_update()?,
+            venue_update_id: Some(r.u64()?),
         },
         KIND_TRADE => Event::Trade {
             instrument,
@@ -412,13 +432,20 @@ impl RecordWriter {
                 source_ts_ns,
                 bid,
                 ask,
+                venue_update_id,
                 ..
             } => {
-                self.body.push(KIND_QUOTE);
+                self.body.push(match venue_update_id {
+                    None => KIND_QUOTE,
+                    Some(_) => KIND_QUOTE_UPDATE_ID,
+                });
                 self.str(symbol);
                 self.body.extend_from_slice(&source_ts_ns.to_le_bytes());
                 self.side_update(bid);
                 self.side_update(ask);
+                if let Some(id) = venue_update_id {
+                    self.body.extend_from_slice(&id.to_le_bytes());
+                }
             }
             Event::Trade {
                 source_ts_ns,

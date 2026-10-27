@@ -183,6 +183,7 @@ pub struct RecordingSink {
     recorder: Recorder,
     refusing: Rc<Cell<bool>>,
     route_down: Rc<Cell<bool>>,
+    would_block: Rc<Cell<bool>>,
 }
 
 impl RecordingSink {
@@ -194,6 +195,7 @@ impl RecordingSink {
             recorder: Recorder::new(magic),
             refusing: Rc::new(Cell::new(false)),
             route_down: Rc::new(Cell::new(false)),
+            would_block: Rc::new(Cell::new(false)),
         }
     }
 
@@ -215,6 +217,13 @@ impl RecordingSink {
     pub fn route_down_switch(&self) -> Rc<Cell<bool>> {
         Rc::clone(&self.route_down)
     }
+
+    /// A handle that makes every later send find the send buffer full, which
+    /// the fan-out absorbs with the route up.
+    #[must_use]
+    pub fn would_block_switch(&self) -> Rc<Cell<bool>> {
+        Rc::clone(&self.would_block)
+    }
 }
 
 impl DatagramSink for RecordingSink {
@@ -233,6 +242,9 @@ impl DatagramSink for RecordingSink {
             return Err(SinkError::RouteDown(std::io::Error::from(
                 std::io::ErrorKind::NetworkUnreachable,
             )));
+        }
+        if self.would_block.get() {
+            return Err(SinkError::WouldBlock);
         }
         self.recorder.datagrams.borrow_mut().push(datagram.to_vec());
         Ok(())
@@ -296,6 +308,9 @@ pub struct FeedRecorders {
     /// interface is gone. Transient, so the publisher must hold on rather than
     /// exit.
     pub mktdata_route_down: Rc<Cell<bool>>,
+    /// Makes the mktdata transmitter find its send buffer full. Absorbed by
+    /// the fan-out with the route up: the datagram did not leave.
+    pub mktdata_would_block: Rc<Cell<bool>>,
     /// What the mktdata role's **reference stream** recorded: the second member
     /// of that fan-out, at `FailureScope::Channel`, as `[adapter.tee]` adds it.
     pub reference: Recorder,
@@ -442,6 +457,18 @@ pub fn harness_both_with_rotation(cycle: Duration) -> Harness {
     harness_inner(&[feed(), depth_feed_with_rotation(cycle)], false)
 }
 
+/// Both feeds on **one** `Channel ID`, the top-of-book block's, with a snapshot
+/// rotation on the depth block: a shard's two feeds sharing an ID, told apart
+/// on the wire by their destination ports alone.
+#[must_use]
+pub fn harness_both_on_one_channel_with_rotation(cycle: Duration) -> Harness {
+    let depth = Feed {
+        channel_id: CHANNEL_ID,
+        ..depth_feed_with_rotation(cycle)
+    };
+    harness_inner(&[feed(), depth], false)
+}
+
 /// The four `[[feed]]` blocks of a publisher carrying two shards of both
 /// specifications: four channel instances over one published set.
 ///
@@ -535,6 +562,7 @@ pub fn ports(feed: &Feed, metrics: &Arc<PublisherMetrics>, magic: u16) -> (Ports
         let recorder = sink.recorder();
         let refusal = sink.refusal_switch();
         let route_down = sink.route_down_switch();
+        let would_block = sink.would_block_switch();
         let reference = RecordingSink::new(reference_name, FailureScope::Channel, magic);
         let reference_recorder = reference.recorder();
         let reference_refusal = reference.refusal_switch();
@@ -546,14 +574,14 @@ pub fn ports(feed: &Feed, metrics: &Arc<PublisherMetrics>, magic: u16) -> (Ports
                 endpoint: EgressEndpoint::new(role, SOURCE, port),
                 sink: tee,
             },
-            (recorder, refusal, route_down),
+            (recorder, refusal, route_down, would_block),
             (reference_recorder, reference_refusal),
         )
     };
 
     let (
         mktdata,
-        (mktdata_recorder, mktdata_refusal, mktdata_route_down),
+        (mktdata_recorder, mktdata_refusal, mktdata_route_down, mktdata_would_block),
         (reference_recorder, reference_refusal),
     ) = open(
         "mktdata",
@@ -561,7 +589,7 @@ pub fn ports(feed: &Feed, metrics: &Arc<PublisherMetrics>, magic: u16) -> (Ports
         PortRole::Mktdata,
         feed.mktdata_port,
     );
-    let (refdata, (refdata_recorder, _, _), (_, refdata_reference_refusal)) = open(
+    let (refdata, (refdata_recorder, _, _, _), (_, refdata_reference_refusal)) = open(
         "refdata",
         "refdata-reference",
         PortRole::Refdata,
@@ -572,7 +600,7 @@ pub fn ports(feed: &Feed, metrics: &Arc<PublisherMetrics>, magic: u16) -> (Ports
         .map(|port| open("snapshot", "snapshot-reference", PortRole::Snapshot, port));
     let snapshot_recorder = snapshot
         .as_ref()
-        .map(|(_, (recorder, _, _), _)| recorder.clone());
+        .map(|(_, (recorder, _, _, _), _)| recorder.clone());
     let snapshot_reference_refusal = snapshot
         .as_ref()
         .map(|(_, _, (_, refusal))| Rc::clone(refusal));
@@ -589,6 +617,7 @@ pub fn ports(feed: &Feed, metrics: &Arc<PublisherMetrics>, magic: u16) -> (Ports
             snapshot: snapshot_recorder,
             mktdata_refusal,
             mktdata_route_down,
+            mktdata_would_block,
             reference: reference_recorder,
             reference_refusal,
             refdata_reference_refusal,
@@ -634,14 +663,17 @@ fn harness_inner(configured: &[Feed], break_writes: bool) -> Harness {
             }
         }
     }
-    let channel_ids: Vec<u8> = configured.iter().map(|feed| feed.channel_id).collect();
+    let channels: Vec<(&str, u8)> = configured
+        .iter()
+        .map(|feed| (feed.spec.as_str(), feed.channel_id))
+        .collect();
 
     let metrics = Arc::new(PublisherMetrics::new(&PublisherMetricsConfig {
         venue: "a-venue",
         source_id: identity.source_id.get(),
         port_roles: &port_roles,
         connections: &["upstream"],
-        channel_ids: &channel_ids,
+        channels: &channels,
         ingress_message_types: &["quote", "trade", "level"],
     }));
 
@@ -1086,6 +1118,7 @@ pub fn quote(instrument: InstrumentRef, source_ts_ns: u64) -> dz_adapter_core::E
             qty: Scalar::text("1.250"),
             source_count: None,
         },
+        venue_update_id: None,
     }
 }
 
@@ -1105,6 +1138,7 @@ pub fn one_sided_quote(
             source_count: None,
         },
         ask: SideUpdate::Gone,
+        venue_update_id: None,
     }
 }
 
@@ -1213,6 +1247,7 @@ pub fn too_precise_quote(
             source_count: None,
         },
         ask: SideUpdate::Gone,
+        venue_update_id: None,
     }
 }
 

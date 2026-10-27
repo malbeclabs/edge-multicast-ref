@@ -102,6 +102,7 @@ fn quote() -> Quote {
         ask_qty: 12,
         bid_source_count: 2,
         ask_source_count: 3,
+        venue_update_id: 0,
     }
 }
 

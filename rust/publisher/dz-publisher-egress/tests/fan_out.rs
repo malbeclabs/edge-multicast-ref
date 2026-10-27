@@ -295,3 +295,95 @@ fn a_reference_stream_whose_consumer_has_not_started_keeps_its_place_in_the_fan_
         "counted every time, under the label a failed send to a socket has",
     );
 }
+
+#[test]
+fn a_datagram_an_absorbed_would_block_lost_is_not_a_packed_datagram() {
+    // The fan-out absorbs a full send buffer and answers `Ok`, with the route
+    // up. The datagram never left the host, so the messages-per-datagram
+    // histogram must not count it; the one after it, accepted, it must.
+    let metrics = metrics(&[PortRole::Mktdata], &[7]);
+    let wire = FakeSink::essential("wire");
+    wire.script([Verdict::WouldBlock, Verdict::Accept]);
+    let mut tee = Tee::new(PortRole::Mktdata, Arc::clone(&metrics));
+    tee.add(wire.boxed());
+    let mut egress = ChannelEgress::<TestFeed, _>::new(
+        EgressEndpoint::new(PortRole::Mktdata, doc_source(), 30001),
+        tee,
+        Arc::clone(&metrics),
+        ResetCount(1),
+        MTU,
+    );
+    assert!(egress.register(7));
+    let observed = |metrics: &dz_publisher_metrics::PublisherMetrics| {
+        sample(
+            metrics,
+            "dz_publisher_egress_messages_per_datagram_count",
+            &[("port_role", "mktdata")],
+        )
+    };
+
+    egress
+        .push(7, &Small, EgressMessageType::Quote, 0)
+        .expect("push");
+    egress
+        .flush(7, 0)
+        .expect("the fan-out absorbs the full buffer");
+    assert_eq!(wire.accepted_count(), 0, "nothing left the host");
+    assert_eq!(
+        observed(&metrics),
+        0,
+        "a datagram that never left was counted"
+    );
+
+    egress
+        .push(7, &Small, EgressMessageType::Quote, 0)
+        .expect("push");
+    egress.flush(7, 0).expect("sent");
+    assert_eq!(wire.accepted_count(), 1);
+    assert_eq!(observed(&metrics), 1);
+}
+
+#[test]
+fn a_nested_fan_out_that_absorbed_a_full_buffer_did_not_deliver() {
+    // A member that is itself a fan-out answers `Ok` for a datagram it lost to
+    // a full buffer. The parent must take its member's word on delivery, not
+    // its `Ok`, or a datagram that reached no destination counts as sent.
+    let metrics = metrics(&[PortRole::Mktdata], &[7]);
+    let wire = FakeSink::essential("wire");
+    wire.script([Verdict::WouldBlock, Verdict::Accept]);
+    let mut inner = Tee::new(PortRole::Mktdata, Arc::clone(&metrics));
+    inner.add(wire.boxed());
+    let mut outer = Tee::new(PortRole::Mktdata, Arc::clone(&metrics));
+    outer.add(Box::new(inner));
+
+    outer.send(b"lost").expect("absorbed twice over");
+    assert_eq!(wire.accepted_count(), 0);
+    assert!(!outer.delivered(), "the nested fan-out delivered nothing");
+
+    outer.send(b"sent").expect("sent");
+    assert_eq!(wire.accepted_count(), 1);
+    assert!(outer.delivered());
+}
+
+#[test]
+fn a_dropped_essential_member_is_not_delivery_by_a_surviving_auxiliary_one() {
+    // The essential member fails hard and is dropped. An auxiliary member
+    // still takes every datagram, but nothing reaches the wire: the fan-out
+    // must not say it delivered, or that the datagram reached the wire, while
+    // the runtime's guard has yet to stop the publisher.
+    let metrics = metrics(&[PortRole::Mktdata], &[7]);
+    let wire = FakeSink::essential("wire");
+    wire.always(Verdict::Broken);
+    let recording = FakeSink::new("recording");
+    let mut tee = Tee::new(PortRole::Mktdata, Arc::clone(&metrics));
+    tee.add(wire.boxed());
+    tee.add(recording.boxed());
+
+    tee.send(b"first").expect("absorbed");
+    assert!(!tee.delivered(), "the essential member refused it");
+    tee.send(b"second")
+        .expect("the auxiliary member is still live");
+    assert_eq!(recording.accepted_count(), 2);
+    assert!(!tee.delivered(), "only the auxiliary member took it");
+    assert!(!tee.reached_wire(), "nothing reached the wire");
+}

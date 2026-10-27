@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 
 use dz_edge_core::PortRole;
-use prometheus::{GaugeVec, IntCounterVec, IntGaugeVec, Registry};
+use prometheus::{GaugeVec, HistogramVec, IntCounterVec, IntGaugeVec, Registry};
 
+use crate::buckets::{messages_per_datagram_buckets, QUOTES_PER_DATAGRAM, TRADES_PER_DATAGRAM};
 use crate::labels::{channel_id_label, EgressErrorReason, EgressMessageType};
-use crate::opts::opts;
+use crate::opts::{histogram_opts, opts};
 
 /// Metrics for the path from the publisher onto the wire.
 ///
@@ -18,6 +19,7 @@ pub struct EgressMetrics {
     errors_total: IntCounterVec,
     sequence_current: IntGaugeVec,
     heartbeat_last_sent_timestamp_seconds: GaugeVec,
+    messages_per_datagram: HistogramVec,
 }
 
 impl EgressMetrics {
@@ -30,7 +32,7 @@ impl EgressMetrics {
         registry: &Registry,
         labels: &HashMap<String, String>,
         port_roles: &[PortRole],
-        channel_ids: &[u8],
+        channels: &[(&str, u8)],
     ) -> Self {
         let datagrams_total = IntCounterVec::new(
             opts(
@@ -112,35 +114,39 @@ impl EgressMetrics {
         let sequence_current = IntGaugeVec::new(
             opts(
                 "dz_publisher_egress_sequence_current",
-                "Current outbound sequence number, by port role and Channel ID. The mktdata/refdata \
-                 role and the snapshot role are separate channel instances with independent \
-                 sequence series; do not aggregate across them.",
+                "Current outbound sequence number, by port role, feed and Channel ID. The \
+                 mktdata/refdata role and the snapshot role are separate channel instances with \
+                 independent sequence series, and so are a shard's two feeds when they share a \
+                 Channel ID; do not aggregate across them.",
                 labels,
             ),
-            &["port_role", "channel_id"],
+            &["port_role", "feed", "channel_id"],
         )
         .expect("static metric definition");
         registry
             .register(Box::new(sequence_current.clone()))
             .expect("static metric registration");
         for port_role in port_roles {
-            for channel_id in channel_ids {
-                sequence_current
-                    .with_label_values(&[port_role.as_str(), channel_id_label(*channel_id)]);
+            for &(feed, channel_id) in channels {
+                sequence_current.with_label_values(&[
+                    port_role.as_str(),
+                    feed,
+                    channel_id_label(channel_id),
+                ]);
             }
         }
 
         let heartbeat_last_sent_timestamp_seconds = GaugeVec::new(
             opts(
                 "dz_publisher_egress_heartbeat_last_sent_timestamp_seconds",
-                "Unix timestamp the last heartbeat was sent, by port role and Channel ID. This is \
+                "Unix timestamp the last heartbeat was sent, by port role, feed and Channel ID. This is \
                  pre-created at 0, so guard any staleness rule on the process having run long \
                  enough to have sent one, for example `and on() dz_publisher_uptime_seconds > 60`; \
                  without that, `time() - this` is an age of decades from startup until the first \
                  heartbeat.",
                 labels,
             ),
-            &["port_role", "channel_id"],
+            &["port_role", "feed", "channel_id"],
         )
         .expect("static metric definition");
         registry
@@ -155,10 +161,42 @@ impl EgressMetrics {
             if !EgressMessageType::Heartbeat.is_valid_on(*port_role) {
                 continue;
             }
-            for channel_id in channel_ids {
-                heartbeat_last_sent_timestamp_seconds
-                    .with_label_values(&[port_role.as_str(), channel_id_label(*channel_id)]);
+            for &(feed, channel_id) in channels {
+                heartbeat_last_sent_timestamp_seconds.with_label_values(&[
+                    port_role.as_str(),
+                    feed,
+                    channel_id_label(channel_id),
+                ]);
             }
+        }
+
+        let messages_per_datagram = HistogramVec::new(
+            histogram_opts(
+                "dz_publisher_egress_messages_per_datagram",
+                &format!(
+                    "Messages in each datagram that left the host, by port role. A lost \
+                     datagram is not observed. A full mktdata datagram holds \
+                     {QUOTES_PER_DATAGRAM} quotes or {TRADES_PER_DATAGRAM} trades: \
+                     le={QUOTES_PER_DATAGRAM} less le={q_less} is a full one of quotes, \
+                     le={TRADES_PER_DATAGRAM} less le={t_less} a full one of trades. A \
+                     proposed addition to the normative set, not yet in the governing \
+                     playbook: messages over datagrams gives only the mean, and only a \
+                     distribution separates a feed that fills its datagrams from one that sends \
+                     most of them nearly empty.",
+                    q_less = QUOTES_PER_DATAGRAM - 1,
+                    t_less = TRADES_PER_DATAGRAM - 1,
+                ),
+                labels,
+                &messages_per_datagram_buckets(),
+            ),
+            &["port_role"],
+        )
+        .expect("static metric definition");
+        registry
+            .register(Box::new(messages_per_datagram.clone()))
+            .expect("static metric registration");
+        for port_role in port_roles {
+            messages_per_datagram.with_label_values(&[port_role.as_str()]);
         }
 
         Self {
@@ -168,6 +206,7 @@ impl EgressMetrics {
             errors_total,
             sequence_current,
             heartbeat_last_sent_timestamp_seconds,
+            messages_per_datagram,
         }
     }
 
@@ -199,29 +238,54 @@ impl EgressMetrics {
             .inc();
     }
 
-    /// Sets the current outbound sequence number for `port_role` and Channel ID.
+    /// Sets the current outbound sequence number for `port_role`, `feed` and
+    /// Channel ID.
+    ///
+    /// `feed` is the codec's `Feed::NAME`. It is a label because a shard's two
+    /// feeds may share a Channel ID, and each is a channel instance with a
+    /// sequence series of its own.
     ///
     /// `Sequence Number` is a `u64` on the wire; a Prometheus gauge is
     /// `i64`. The saturating conversion lives here so the lossy step is
     /// done once, by the crate that owns the contract, rather than as an
     /// `as i64` at every call site. A publisher would have to send 9.2
     /// quintillion datagrams on one channel instance to reach the clamp.
-    pub fn set_sequence(&self, port_role: PortRole, channel_id: u8, seq: u64) {
+    pub fn set_sequence(&self, port_role: PortRole, feed: &str, channel_id: u8, seq: u64) {
         self.sequence_current
-            .with_label_values(&[port_role.as_str(), channel_id_label(channel_id)])
+            .with_label_values(&[port_role.as_str(), feed, channel_id_label(channel_id)])
             .set(i64::try_from(seq).unwrap_or(i64::MAX));
     }
 
-    /// Sets the Unix timestamp the last heartbeat was sent, for `port_role`
-    /// and Channel ID.
+    /// Sets the Unix timestamp the last heartbeat was sent, for `port_role`,
+    /// `feed` and Channel ID.
     ///
     /// Carries `port_role` like every other series here: a channel instance
     /// is keyed on the destination port, so once a Channel ID heartbeats on
     /// two port roles, one label would fold both onto one gauge and hide
     /// the staler port's age behind the fresher one.
-    pub fn set_heartbeat_last_sent(&self, port_role: PortRole, channel_id: u8, unix_seconds: f64) {
+    pub fn set_heartbeat_last_sent(
+        &self,
+        port_role: PortRole,
+        feed: &str,
+        channel_id: u8,
+        unix_seconds: f64,
+    ) {
         self.heartbeat_last_sent_timestamp_seconds
-            .with_label_values(&[port_role.as_str(), channel_id_label(channel_id)])
+            .with_label_values(&[port_role.as_str(), feed, channel_id_label(channel_id)])
             .set(unix_seconds);
+    }
+
+    /// Records how many messages one datagram that left the host on
+    /// `port_role` carried.
+    ///
+    /// Once per datagram that reached the wire: a datagram a sink lost, or one
+    /// sent while the route is down, is not observed. Counts the family this
+    /// crate proposes rather than one the playbook carries.
+    pub fn messages_in_datagram(&self, port_role: PortRole, messages: u64) {
+        // A message count, exact in an `f64`.
+        #[allow(clippy::cast_precision_loss)]
+        self.messages_per_datagram
+            .with_label_values(&[port_role.as_str()])
+            .observe(messages as f64);
     }
 }

@@ -330,6 +330,7 @@ fn quote(bid_source_count: u16, ask_source_count: u16) -> Quote {
         ask_qty: 7,
         bid_source_count,
         ask_source_count,
+        venue_update_id: 0,
     }
 }
 
@@ -525,6 +526,7 @@ fn derived_book_tops(bid_source_count: u16, ask_source_count: u16) -> Vec<BookTo
         ask_qty: 7,
         bid_source_count,
         ask_source_count,
+        venue_update_id: 0,
     });
     let mut datagrams = pack::<TopOfBook>(
         &[Msg::Definition(definition(AAA, "AAA", -2))],

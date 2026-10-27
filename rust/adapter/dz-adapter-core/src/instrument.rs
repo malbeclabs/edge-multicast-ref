@@ -137,6 +137,16 @@ pub enum AssetClass {
     PredictionScalar,
     PredictionCategorical,
     PerpetualFuture,
+    /// A futures contract with a fixed expiry, which converges at delivery or
+    /// final settlement rather than by funding.
+    ///
+    /// The top-of-book specification, and the feeds that take this value
+    /// from it, bind two other fields to it: `Expiry` is never zero, and
+    /// `Settle Type` is cash or physical. The runtime refuses a listing that
+    /// states this class without both, so an adapter cannot publish a dated
+    /// future a subscriber would read as never expiring. The midpoint feed
+    /// binds only the expiry, and this workspace has no midpoint send path.
+    DatedFuture,
 }
 
 /// How the venue matches.

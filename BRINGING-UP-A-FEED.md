@@ -127,11 +127,11 @@ one, but the two lines that matter here:
 
 ```toml
 [workspace.dependencies]
-dz-adapter-core = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.6.0" }
-dz-publisher-runtime = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.6.0" }
-dz-ingress-core = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.6.0", features = ["websocket"] }
+dz-adapter-core = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.9.0" }
+dz-publisher-runtime = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.9.0" }
+dz-ingress-core = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.9.0", features = ["websocket"] }
 # or, for a venue whose feed arrives over a session:
-dz-ingress-fix = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.6.0" }
+dz-ingress-fix = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.9.0" }
 ```
 
 **Every crate from the same tag, pinned in one place.** Two tags in one graph
@@ -447,11 +447,13 @@ kind = "a-venue-tob"
   than `1` but a datagram the kernel accepts and no interface ever carries.
 - **`source_id` and `channel_id` are identity on the wire.** Two publishers
   sharing a `Source ID` on one group are indistinguishable to a subscriber's gap
-  detection. Two `[[feed]]` blocks in one document sharing a `channel_id` are
-  refused at load naming both, rather than started: the metric families keyed on
-  `channel_id` cannot tell two channel instances apart, so the pair would
-  pre-create one set of series and both would write to it with nothing saying
-  so.
+  detection. Two `[[feed]]` blocks in one document may share a `channel_id`
+  only as one shard's two feeds, Top-of-Book and Market-by-Price, on five
+  distinct destination ports: the ID then names one instrument set on both, and
+  the port is what keeps their channel instances apart. Everything else on one
+  ID is refused at load naming both blocks: two blocks of one specification
+  (`DuplicateChannelId`), two shards (`ChannelIdOnTwoShards`), and a port the
+  two blocks have in common (`ChannelInstancePortShared`).
 - **`shard` is optional, and an operator needs it only when one process carries
   several channels of one specification.** Absent means the default shard, which
   is what a publisher with one channel per specification has always been, so a

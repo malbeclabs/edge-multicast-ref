@@ -102,8 +102,13 @@
 
 use std::collections::BTreeSet;
 use std::marker::PhantomData;
+use std::sync::{Arc, Mutex, MutexGuard};
 
-use dz_adapter_core::Adapter;
+use dz_adapter_core::{
+    Adapter, AdapterError, ConnectionId, DepthBound, DisconnectReason, EventSink, InstrumentRef,
+    ListingSink, ParseError, Payload, SnapshotSink, ThreadedAdapter, UpstreamSink,
+    VenueTimestampKind,
+};
 use dz_ingress_core::Input;
 use prometheus::core::Collector;
 
@@ -197,9 +202,10 @@ impl AdapterResolution for AdapterInitError {
 /// hidden.
 ///
 /// `#[non_exhaustive]`: this is the second breaking addition to this struct's
-/// fields, and every field is public. Build one through [`Venue::single`] or
-/// [`Venue::new`], and add to one through [`Venue::with_collectors`], so the
-/// next field is additive rather than another break.
+/// fields, and every field is public. Build one through [`Venue::single`],
+/// [`Venue::new`] or [`Venue::threaded`], and add to one through
+/// [`Venue::with_collectors`], so the next field is additive rather than
+/// another break — [`threaded`](Self::threaded) was the first that was.
 #[non_exhaustive]
 pub struct Venue {
     /// The venue's mapping from its upstream's payloads onto normalized events.
@@ -251,6 +257,95 @@ pub struct Venue {
     ///
     /// [`Adapter::message_types`]: dz_adapter_core::Adapter::message_types
     pub collectors: Vec<Box<dyn Collector>>,
+    /// The same adapter, as the threaded input model drives it, when the venue
+    /// was built with [`Venue::threaded`]; `None` for an inline venue.
+    ///
+    /// **This is how a runtime picks the model**, and the only thing it reads
+    /// to pick: `Some` decodes on each connection's own task, `None` maps every
+    /// payload inline on the publisher loop as it always has.
+    ///
+    /// [`adapter`](Self::adapter) is still there for a threaded venue and still
+    /// works. It is a handle on this one object, through this lock, that drives
+    /// it as an inline adapter — which a threaded adapter also is — so code that
+    /// reads `adapter` sees the venue's own adapter either way.
+    pub threaded: Option<SharedThreadedAdapter>,
+}
+
+/// A threaded adapter, held where both the publisher loop and every connection
+/// task can reach it.
+///
+/// A lock because the rare callbacks — connect, disconnect, the upstream poll —
+/// come from connection tasks, while listings, snapshots and
+/// [`ThreadedAdapter::on_decoded`] come from the loop. None of them is held
+/// across an await, and decode does not take it at all.
+pub type SharedThreadedAdapter = Arc<Mutex<Box<dyn ThreadedAdapter>>>;
+
+/// [`Venue::adapter`] for a threaded venue: the shared adapter, driven inline.
+///
+/// Every method is written out, for the reason the runtime's own delegate
+/// writes them out: a forwarder that inherits a default answers for the
+/// venue with the default.
+struct ThreadedAsInline {
+    shared: SharedThreadedAdapter,
+    /// Copied out at construction: the method returns a borrow, and there is
+    /// no way to lend one out of a lock. The set is declared once, at startup.
+    message_types: Vec<&'static str>,
+}
+
+impl ThreadedAsInline {
+    fn held(&self) -> MutexGuard<'_, Box<dyn ThreadedAdapter>> {
+        self.shared.lock().unwrap_or_else(|held| held.into_inner())
+    }
+}
+
+impl Adapter for ThreadedAsInline {
+    fn message_types(&self) -> &[&'static str] {
+        &self.message_types
+    }
+
+    fn source_timestamp_kind(&self) -> Option<VenueTimestampKind> {
+        self.held().source_timestamp_kind()
+    }
+
+    fn poll_listings(&mut self, out: &mut dyn ListingSink) {
+        self.held().poll_listings(out);
+    }
+
+    fn on_connected(
+        &mut self,
+        conn: ConnectionId,
+        out: &mut dyn UpstreamSink,
+    ) -> Result<(), AdapterError> {
+        self.held().on_connected(conn, out)
+    }
+
+    fn poll_upstream(
+        &mut self,
+        conn: ConnectionId,
+        out: &mut dyn UpstreamSink,
+    ) -> Result<(), AdapterError> {
+        self.held().poll_upstream(conn, out)
+    }
+
+    fn on_disconnected(&mut self, conn: ConnectionId, reason: DisconnectReason) {
+        self.held().on_disconnected(conn, reason);
+    }
+
+    fn on_payload(
+        &mut self,
+        payload: &Payload<'_>,
+        out: &mut dyn EventSink,
+    ) -> Result<(), ParseError> {
+        self.held().on_payload(payload, out)
+    }
+
+    fn snapshot(
+        &self,
+        instrument: InstrumentRef,
+        out: &mut dyn SnapshotSink,
+    ) -> Result<DepthBound, AdapterError> {
+        self.held().snapshot(instrument, out)
+    }
 }
 
 impl Venue {
@@ -266,6 +361,35 @@ impl Venue {
             adapter,
             sources,
             collectors: Vec::new(),
+            threaded: None,
+        }
+    }
+
+    /// A venue whose decode runs on each connection's own task.
+    ///
+    /// The threaded input model, beside the inline one [`Venue::new`] builds:
+    /// a [`Decoder`](dz_adapter_core::Decoder) per connection decodes in
+    /// parallel, the runtime dedupes across connections in two stages, and
+    /// only what survives reaches the publisher loop, through
+    /// [`ThreadedAdapter::on_decoded`]. For a venue whose payloads are
+    /// expensive to decode and arrive redundantly; a cheap decode is better
+    /// served inline, with no queue between the transport and the loop.
+    ///
+    /// Everything else is what [`Venue::new`] gives: the same inputs, the
+    /// same collectors, and an [`adapter`](Self::adapter) field that drives
+    /// this same object inline.
+    #[must_use]
+    pub fn threaded(adapter: Box<dyn ThreadedAdapter>, inputs: Vec<Box<dyn Input>>) -> Self {
+        let message_types = adapter.message_types().to_vec();
+        let shared: SharedThreadedAdapter = Arc::new(Mutex::new(adapter));
+        Self {
+            adapter: Box::new(ThreadedAsInline {
+                shared: Arc::clone(&shared),
+                message_types,
+            }),
+            sources: inputs,
+            collectors: Vec::new(),
+            threaded: Some(shared),
         }
     }
 

@@ -223,3 +223,40 @@ fn a_venue_that_declares_no_clock_leaves_the_venue_family_alone() {
         "this half never needed one"
     );
 }
+
+#[test]
+fn an_event_with_no_venue_stamp_skips_venue_to_recv_and_still_times_the_send() {
+    // A venue that stamps some message types and not others: the adapter
+    // declares its clock and leaves the unstamped event at 0, which is the
+    // value for "not available".
+    let mut h = harness(feed());
+    let mut adapter = Declaring(FakeAdapter::new(&["ONE"]));
+    h.publisher.declare_venue_timestamps(&adapter);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = dz_adapter_core::InstrumentRef::from_admission(0);
+
+    h.publisher.payload_scope(Some(RECV_TS_NS));
+    h.publisher.arrive(harness::quote(instrument, SOURCE_TS_NS));
+    h.publisher.payload_scope(None);
+    h.publisher.payload_scope(Some(RECV_TS_NS + 1));
+    h.publisher.arrive(harness::quote(instrument, 0));
+    h.publisher.payload_scope(None);
+
+    let exposition = h.metrics.render();
+    assert_eq!(
+        rendered_count(
+            &exposition,
+            "dz_publisher_venue_to_recv_latency_seconds_count"
+        ),
+        1,
+        "only the stamped event is a venue-to-receive observation"
+    );
+    assert_eq!(
+        rendered_count(
+            &exposition,
+            "dz_publisher_recv_to_send_latency_seconds_count"
+        ),
+        2,
+        "both events are timed to the send"
+    );
+}

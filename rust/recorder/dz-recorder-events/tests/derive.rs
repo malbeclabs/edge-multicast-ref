@@ -96,6 +96,7 @@ fn a_quote_becomes_a_row_carrying_both_sides() {
             ask_qty: 7,
             bid_source_count: 0,
             ask_source_count: 0,
+            venue_update_id: 0,
         })],
         PortRole::Mktdata,
         MAGIC_TOB,
@@ -358,6 +359,7 @@ fn a_message_for_an_undefined_instrument_is_refused_rather_than_filled_in() {
             ask_qty: 7,
             bid_source_count: 0,
             ask_source_count: 0,
+            venue_update_id: 0,
         })],
         PortRole::Mktdata,
         MAGIC_TOB,
@@ -467,5 +469,6 @@ fn quote(bid_price: i64) -> Msg {
         ask_qty: 7,
         bid_source_count: 0,
         ask_source_count: 0,
+        venue_update_id: 0,
     })
 }

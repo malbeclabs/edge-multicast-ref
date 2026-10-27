@@ -41,12 +41,16 @@ What does not partition is identity. One `Registry`, one `Instrument ID` minting
 
 **The default shard keeps the names it has**, and that is an upgrade property rather than a preference. Its era file is `<spec>.era` and not `<spec>.default.era`, because a renamed era file reads as *no* era file and resolves to the first era — a publisher on era 7 restarting on era 1 and announcing nothing is the corruption the corrupt-file refusal exists to prevent, delivered by the upgrade meant to be safe. And a document with no `shard` key means what it always meant, so there is no migration.
 
+**A shard's two feeds may share a `channel_id`.** One ID then names one instrument set on both feeds, and the destination port is what keeps their channel instances apart; the sequence, heartbeat and last-published gauges carry `feed` for the same reason.
+
 Refused at load, each for a failure that is otherwise silent:
 
 | Refused | The failure it prevents |
 |---|---|
 | two blocks naming one `(spec, shard)` pair | two channel instances publishing one partition, whose numbering a subscriber on either reads as its own gaps |
-| two blocks sharing a `channel_id` | `Config::channel_ids()` sorts and dedups, so one set of metric series is pre-created and two channel instances write to it with nothing saying so |
+| two blocks of one specification sharing a `channel_id` | two writers of one feed's channel, into one set of metric series |
+| a `channel_id` shared across two shards | one ID naming two instrument sets, so a subscriber joining the two feeds on it joins instruments that are not the same |
+| a shard's two feeds on one `channel_id` sharing a destination port | one channel instance carrying two `Sequence Number` series |
 | a shard with no block for a specification another shard has one for | an instrument admitted to it has quotes that reach no wire, which is the check that makes `list_on` total |
 | a shard name that is not one lowercase path component of at most sixty-four bytes | the name becomes a path component later, and one with a slash in it writes somewhere nobody configured |
 | a block spelling the default shard's own token | two spellings of one shard, and so two era files for one channel instance |

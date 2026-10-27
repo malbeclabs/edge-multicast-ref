@@ -7,7 +7,7 @@ fn a_counter_incremented_twice_renders_the_value_two() {
         source_id: 1,
         port_roles: &[],
         connections: &[],
-        channel_ids: &[],
+        channels: &[],
         ingress_message_types: &[],
     });
 
@@ -37,13 +37,13 @@ fn a_sequence_number_beyond_i64_saturates_rather_than_wrapping() {
         source_id: 1,
         port_roles: &[PortRole::Mktdata],
         connections: &[],
-        channel_ids: &[1],
+        channels: &[("top-of-book", 1)],
         ingress_message_types: &[],
     });
 
     metrics
         .egress()
-        .set_sequence(PortRole::Mktdata, 1, u64::MAX);
+        .set_sequence(PortRole::Mktdata, "top-of-book", 1, u64::MAX);
     metrics.refdata().set_manifest_seq(1, u64::MAX);
 
     let rendered = metrics.render();

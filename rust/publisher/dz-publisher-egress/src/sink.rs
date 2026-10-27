@@ -86,6 +86,17 @@ pub trait DatagramSink {
         true
     }
 
+    /// Whether the last datagram this sink took, with `Ok`, was actually
+    /// accepted by its destination.
+    ///
+    /// Not [`reached_wire`](Self::reached_wire), which answers for the route:
+    /// a [`Tee`] also absorbs a full send buffer and returns `Ok` with the
+    /// route up, and that datagram never left the host. `true` for a sink that
+    /// is its own destination, which reports a refusal as its error.
+    fn delivered(&self) -> bool {
+        true
+    }
+
     /// What a failure of this sink costs. No default: a sink whose scope
     /// nobody stated would be given one by whichever answer this crate
     /// happened to pick, and both answers are wrong for some sink.
@@ -128,6 +139,9 @@ pub struct Tee {
     metrics: Arc<PublisherMetrics>,
     members: Vec<Member>,
     process_failure: Option<String>,
+    /// Whether the last send was accepted where it counts: by every essential
+    /// member, or, with none, by any member. See [`DatagramSink::delivered`].
+    delivered: bool,
 }
 
 struct Member {
@@ -164,6 +178,7 @@ impl Tee {
             metrics,
             members: Vec::new(),
             process_failure: None,
+            delivered: false,
         }
     }
 
@@ -268,12 +283,29 @@ impl DatagramSink for Tee {
         if self.live() == 0 {
             return Err(SinkError::NotRegistered);
         }
+        // Essential members decide whether the datagram left; with none, any
+        // member that took it is where it went.
+        let mut essential = (0_usize, 0_usize);
+        let mut any_accepted = false;
         for member in &mut self.members {
+            // Counted before the skip: a dropped essential member is one the
+            // datagram did not reach, not one that stopped counting.
+            let is_essential = member.sink.failure_scope() == FailureScope::Process;
+            essential.0 += usize::from(is_essential);
             if !member.live {
                 continue;
             }
             match member.sink.send(datagram) {
-                Ok(()) => member.route_down = false,
+                Ok(()) => {
+                    member.route_down = false;
+                    // `Ok` is not delivery: a member that is itself a fan-out
+                    // answers `Ok` for a datagram it lost to a full buffer, so
+                    // its own word on delivery is the one taken.
+                    if member.sink.delivered() {
+                        any_accepted = true;
+                        essential.1 += usize::from(is_essential);
+                    }
+                }
                 Err(error) => {
                     // Only a send that reached the route says anything about
                     // it: a full buffer or an oversized datagram leaves the
@@ -295,11 +327,29 @@ impl DatagramSink for Tee {
                 }
             }
         }
+        self.delivered = if essential.0 > 0 {
+            essential.1 == essential.0
+        } else {
+            any_accepted
+        };
         Ok(())
     }
 
+    /// No essential member is without a route, and none has been dropped:
+    /// a surviving auxiliary member is not the wire.
     fn reached_wire(&self) -> bool {
         !self.essential_route_down()
+            && self
+                .members
+                .iter()
+                .all(|m| m.live || m.sink.failure_scope() != FailureScope::Process)
+    }
+
+    /// Every essential member accepted the last datagram, or, with none, some
+    /// member did. A full buffer absorbed with the route up is `false` here and
+    /// `true` for [`reached_wire`](DatagramSink::reached_wire).
+    fn delivered(&self) -> bool {
+        self.delivered
     }
 
     /// The widest scope any member declares.

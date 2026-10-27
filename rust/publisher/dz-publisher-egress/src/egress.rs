@@ -356,6 +356,13 @@ impl<F: Feed, S: DatagramSink> ChannelEgress<F, S> {
         let egress = self.metrics.egress();
         let port_role = self.endpoint.port_role;
         egress.datagram(port_role);
+        // Only a datagram that left. A fan-out answers `Ok` both while its
+        // route is down and when it absorbed a full send buffer with the route
+        // up, and a datagram that went nowhere is not one a packing rate
+        // should count.
+        if self.sink.reached_wire() && self.sink.delivered() {
+            egress.messages_in_datagram(port_role, tally.iter().map(|(_, count)| count).sum());
+        }
         egress.bytes(port_role, datagram.len() as u64);
         for (message_type, count) in tally {
             for _ in 0..count {
@@ -380,13 +387,14 @@ impl<F: Feed, S: DatagramSink> ChannelEgress<F, S> {
             if message_type == EgressMessageType::Heartbeat && self.sink.reached_wire() {
                 egress.set_heartbeat_last_sent(
                     port_role,
+                    F::NAME,
                     channel_id,
                     send_timestamp_ns as f64 / 1e9,
                 );
             }
         }
         if let Some(sequence_number) = sequence_number {
-            egress.set_sequence(port_role, channel_id, sequence_number);
+            egress.set_sequence(port_role, F::NAME, channel_id, sequence_number);
         }
         Ok(())
     }

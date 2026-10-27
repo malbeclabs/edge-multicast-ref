@@ -25,7 +25,7 @@
 //!
 //! # Proposed additions the playbook does not yet carry
 //!
-//! Four families and two label values here are **not** normative. Each exists
+//! Ten families and two label values here are **not** normative. Each exists
 //! because a piece of work in this workspace produced a number with nowhere to
 //! go and refused to invent a series for it, leaving the count exposed on a
 //! struct or in a log line instead. They are marked as proposals in their own
@@ -41,6 +41,16 @@
 //!   [`AdapterErrorReason`].
 //! - `dz_publisher_channel_last_published_timestamp_seconds{channel_id}` - see
 //!   [`ChannelMetrics`].
+//! - `dz_publisher_ingress_queue_depth`, `dz_publisher_ingress_batch_size` and
+//!   `dz_publisher_ingress_queue_wait_seconds` - see
+//!   [`IngressMetrics::set_queue_depth`], [`IngressMetrics::batch`] and
+//!   [`IngressMetrics::observe_queue_wait`].
+//! - `dz_publisher_egress_messages_per_datagram{port_role}` - see
+//!   [`EgressMetrics::messages_in_datagram`].
+//! - `dz_publisher_ingress_late_identities_total` - see
+//!   [`IngressMetrics::late_identity`].
+//! - `dz_publisher_ingress_claims_lost_to_newer_generation_total` - see
+//!   [`IngressMetrics::claim_lost_to_newer_generation`].
 //! - `not_carried_by_feed` and `malformed_message` on the normative
 //!   `dz_publisher_egress_errors_total{port_role,reason}` - see
 //!   [`EgressErrorReason`].
@@ -71,7 +81,10 @@ mod venue_registry;
 use prometheus::proto::LabelPair;
 use prometheus::{Registry, TextEncoder};
 
-pub use buckets::{LATENCY_BUCKETS, REFDATA_LOAD_DURATION_BUCKETS};
+pub use buckets::{
+    messages_per_datagram_buckets, INGRESS_BATCH_SIZE_BUCKETS, LATENCY_BUCKETS,
+    QUOTES_PER_DATAGRAM, REFDATA_LOAD_DURATION_BUCKETS, TRADES_PER_DATAGRAM,
+};
 pub use error::MetricsError;
 pub use labels::{
     AdapterErrorReason, ConnectFailureReason, EgressErrorReason, EgressMessageType, EventKind,
@@ -109,9 +122,14 @@ pub struct PublisherMetricsConfig<'a> {
     /// metric most exists for. Leaving this empty leaves that alert unable
     /// to fire until the first successful connection.
     pub connections: &'a [&'a str],
-    /// Every Channel ID this publisher sends on, so the sequence,
+    /// Every `(feed, Channel ID)` this publisher sends on, so the sequence,
     /// heartbeat, manifest and last-published gauges exist from startup.
-    pub channel_ids: &'a [u8],
+    ///
+    /// The feed is the specification's name, the codec's `Feed::NAME`
+    /// (`top-of-book`, `market-by-price`). A shard's two feeds may share a
+    /// Channel ID, and each is a channel instance of its own, so one pair per
+    /// feed the publisher sends.
+    pub channels: &'a [(&'a str, u8)],
     /// The upstream source's own message-type names that this publisher
     /// counts individually on `dz_publisher_ingress_messages_total`.
     ///
@@ -173,10 +191,16 @@ impl PublisherMetrics {
         );
         let lowering = LoweringMetrics::new(&registry, &labels);
         let book = BookMetrics::new(&registry, &labels);
-        let refdata =
-            RefdataMetrics::new(&registry, &labels, config.channel_ids, config.port_roles);
-        let egress = EgressMetrics::new(&registry, &labels, config.port_roles, config.channel_ids);
-        let channel = ChannelMetrics::new(&registry, &labels, config.channel_ids);
+        // The reference-data gauges are keyed on Channel ID alone: the
+        // published set behind one ID is one shard's, whichever feed carries it,
+        // so they are pre-created once per distinct ID. The sequence, heartbeat
+        // and last-published gauges carry `feed` and are pre-created per pair.
+        let mut channel_ids: Vec<u8> = config.channels.iter().map(|&(_, id)| id).collect();
+        channel_ids.sort_unstable();
+        channel_ids.dedup();
+        let refdata = RefdataMetrics::new(&registry, &labels, &channel_ids, config.port_roles);
+        let egress = EgressMetrics::new(&registry, &labels, config.port_roles, config.channels);
+        let channel = ChannelMetrics::new(&registry, &labels, config.channels);
         let latency = LatencyMetrics::new(&registry, &labels);
         let process = ProcessMetrics::new(&registry, &labels);
 

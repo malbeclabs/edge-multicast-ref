@@ -53,7 +53,9 @@ use dz_edge_core::{AppMessage, EndOfSession, Heartbeat, PortRole, ResetCount, MA
 use dz_edge_mbp::{BookClear, InstrumentReset, LevelUpdate};
 use dz_edge_refdata::ManifestSummary;
 use dz_edge_tob::{Quote, Trade};
-use dz_publisher_egress::{ChannelEgress, EgressEndpoint, EgressError, RouteState, Tee};
+use dz_publisher_egress::{
+    ChannelEgress, DatagramSink, EgressEndpoint, EgressError, RouteState, Tee,
+};
 use dz_publisher_lowering::Snapshot;
 use dz_publisher_metrics::{EgressMessageType, EventKind, PublisherMetrics};
 use dz_publisher_refdata::PublishedDefinition;
@@ -191,6 +193,13 @@ pub struct FeedPipeline<F: EmittedFeed> {
     /// *"sent when there is no other traffic"* rather than sent on a timer
     /// alongside traffic.
     last_mktdata_ns: Option<u64>,
+    /// Whether live messages are packed rather than sent one per datagram.
+    ///
+    /// Always for market-by-price. For top-of-book only once
+    /// [`pack_live`](Self::pack_live) is called, which the runtime does for a
+    /// threaded venue, whose loop sends what is packed at the end of every
+    /// batch. An inline venue's top-of-book keeps one datagram per message.
+    packs_live: bool,
     /// The open mktdata datagram holds packed live messages.
     live_packed: bool,
     /// Monotonic. When the open datagram's first live message was packed, so
@@ -200,6 +209,18 @@ pub struct FeedPipeline<F: EmittedFeed> {
     packed_arrivals: Vec<Arrival>,
     /// Arrivals whose datagram left, with its `Send Timestamp`; a lost one's are dropped.
     sent_arrivals: Vec<(Arrival, u64)>,
+    /// Arrivals in the open mktdata datagram that another feed measures, and
+    /// this one only if that feed's copy did not leave, each with the token
+    /// that names the message on both feeds.
+    packed_fallbacks: Vec<(Arrival, u64)>,
+    /// The same, once their datagram left, with its `Send Timestamp`.
+    sent_fallbacks: Vec<(Arrival, u64, u64)>,
+    /// Tokens of messages in the open mktdata datagram that another feed
+    /// carries as a fallback.
+    packed_tokens: Vec<u64>,
+    /// Those tokens once their datagram was decided: whether it left with its
+    /// route up.
+    resolved_tokens: Vec<(u64, bool)>,
     /// `(monotonic, unix)` of the last packed datagram to leave, until taken.
     live_sent: Option<(u64, u64)>,
     /// Monotonic. When the manifest is next due.
@@ -264,10 +285,15 @@ impl<F: EmittedFeed> FeedPipeline<F> {
             manifest_cadence_ns: nanos(feed.manifest_cadence),
             snapshot_cycle: feed.snapshot_cycle,
             last_mktdata_ns: None,
+            packs_live: matches!(F::SPEC, FeedSpec::MarketByPrice),
             live_packed: false,
             live_since_ns: None,
             packed_arrivals: Vec::new(),
             sent_arrivals: Vec::new(),
+            packed_fallbacks: Vec::new(),
+            sent_fallbacks: Vec::new(),
+            packed_tokens: Vec::new(),
+            resolved_tokens: Vec::new(),
             live_sent: None,
             next_manifest_ns: None,
             feed: PhantomData,
@@ -306,6 +332,13 @@ impl<F: EmittedFeed> FeedPipeline<F> {
         self.channel_id
     }
 
+    /// The feed this path sends, as the codec names it (`Feed::NAME`): the
+    /// value of the `feed` label on the series it writes.
+    #[must_use]
+    pub const fn feed(&self) -> &'static str {
+        F::NAME
+    }
+
     /// One `0x03 Quote`, sent.
     ///
     /// # Errors
@@ -321,7 +354,23 @@ impl<F: EmittedFeed> FeedPipeline<F> {
         self.live_mktdata(quote, EgressMessageType::Quote, now_mono_ns, send_ts_ns)
     }
 
-    /// One `0x04 Trade`: sent on top-of-book, packed on market-by-price.
+    /// Pack live messages into the open datagram from now on, as
+    /// market-by-price always does, rather than sending each alone.
+    ///
+    /// For the threaded input model, which sends what is packed at the end of
+    /// every batch. Set once, at composition; a market-by-price send path
+    /// already packs and is unchanged by it.
+    pub fn pack_live(&mut self) {
+        self.packs_live = true;
+    }
+
+    /// Whether live messages are packed rather than sent one per datagram.
+    #[must_use]
+    pub const fn packs_live(&self) -> bool {
+        self.packs_live
+    }
+
+    /// One `0x04 Trade`: packed where live messages pack, otherwise sent.
     ///
     /// Takes an already-lowered `Trade` rather than lowering one, and that is
     /// the mechanism behind the cross-specification obligation: the wire
@@ -730,6 +779,25 @@ impl<F: EmittedFeed> FeedPipeline<F> {
         self.packed_arrivals.push(arrival);
     }
 
+    /// Record the arrival of the live message just packed, for a message
+    /// another feed measures: observed here only if that feed's copy, named
+    /// by `token`, did not leave.
+    pub fn packed_fallback_arrival(&mut self, arrival: Arrival, token: u64) {
+        self.packed_fallbacks.push((arrival, token));
+    }
+
+    /// Name the live message just packed, which another feed carries as a
+    /// fallback, so that feed learns whether this copy left.
+    pub fn packed_token(&mut self, token: u64) {
+        self.packed_tokens.push(token);
+    }
+
+    /// Tokens whose datagram was decided since the last call, each with
+    /// whether it left with its route up.
+    pub fn resolved_tokens(&mut self) -> std::vec::Drain<'_, (u64, bool)> {
+        self.resolved_tokens.drain(..)
+    }
+
     /// Monotonic. When the open datagram's first live message was packed, or
     /// `None` when nothing live is waiting.
     #[must_use]
@@ -745,6 +813,12 @@ impl<F: EmittedFeed> FeedPipeline<F> {
     /// Arrivals whose datagram left, each with its `Send Timestamp`.
     pub fn sent_arrivals(&mut self) -> std::vec::Drain<'_, (Arrival, u64)> {
         self.sent_arrivals.drain(..)
+    }
+
+    /// Fallback arrivals whose datagram left, each with its `Send Timestamp`
+    /// and its token.
+    pub fn sent_fallback_arrivals(&mut self) -> std::vec::Drain<'_, (Arrival, u64, u64)> {
+        self.sent_fallbacks.drain(..)
     }
 
     /// `Anchor Seq` for a book captured now; sends the open datagram first.
@@ -775,7 +849,9 @@ impl<F: EmittedFeed> FeedPipeline<F> {
         self.flush_mktdata(now_mono_ns, send_ts_ns)
     }
 
-    /// A live message: packed on market-by-price, sent at once on top-of-book.
+    /// A live message: packed where this send path packs live messages —
+    /// market-by-price always, top-of-book under the threaded model — and
+    /// otherwise sent at once.
     fn live_mktdata<M: AppMessage>(
         &mut self,
         message: &M,
@@ -783,22 +859,18 @@ impl<F: EmittedFeed> FeedPipeline<F> {
         now_mono_ns: u64,
         send_ts_ns: u64,
     ) -> Result<(), EgressError> {
-        match F::SPEC {
-            FeedSpec::MarketByPrice => {
-                self.pack_mktdata(message, message_type, now_mono_ns, send_ts_ns)?;
-                // After the push, which may have sent the datagram this message
-                // did not fit in: the clock is the new datagram's, and it starts
-                // with this message.
-                if !self.live_packed {
-                    self.live_since_ns = Some(now_mono_ns);
-                }
-                self.live_packed = true;
-                Ok(())
-            }
-            FeedSpec::TopOfBook => {
-                self.send_mktdata(message, message_type, now_mono_ns, send_ts_ns)
-            }
+        if !self.packs_live {
+            return self.send_mktdata(message, message_type, now_mono_ns, send_ts_ns);
         }
+        self.pack_mktdata(message, message_type, now_mono_ns, send_ts_ns)?;
+        // After the push, which may have sent the datagram this message did
+        // not fit in: the clock is the new datagram's, and it starts with this
+        // message.
+        if !self.live_packed {
+            self.live_since_ns = Some(now_mono_ns);
+        }
+        self.live_packed = true;
+        Ok(())
     }
 
     /// The datagram holding packed live messages was sent, or lost.
@@ -807,16 +879,33 @@ impl<F: EmittedFeed> FeedPipeline<F> {
         if !std::mem::take(&mut self.live_packed) {
             return;
         }
+        // Read right after the send that decided it: whether this datagram
+        // left. `Ok` is not that: the fan-out absorbs a full send buffer with
+        // the route up, so its own word on delivery is the one taken. A copy
+        // that did not leave has no latency, and the other feed's fallback
+        // for it is measured instead.
+        let left =
+            sent && self.mktdata.sink().delivered() && !self.mktdata.sink().essential_route_down();
+        self.resolved_tokens
+            .extend(self.packed_tokens.drain(..).map(|token| (token, left)));
         if sent {
             self.last_mktdata_ns = Some(now_mono_ns);
             self.live_sent = Some((now_mono_ns, send_ts_ns));
+        }
+        if left {
             self.sent_arrivals.extend(
                 self.packed_arrivals
                     .drain(..)
                     .map(|arrival| (arrival, send_ts_ns)),
             );
+            self.sent_fallbacks.extend(
+                self.packed_fallbacks
+                    .drain(..)
+                    .map(|(arrival, token)| (arrival, send_ts_ns, token)),
+            );
         } else {
             self.packed_arrivals.clear();
+            self.packed_fallbacks.clear();
         }
     }
 

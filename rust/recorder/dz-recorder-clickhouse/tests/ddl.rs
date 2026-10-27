@@ -4022,6 +4022,10 @@ fn the_read_extraction_sees_a_join_and_not_only_a_from() {
 
 /// `012` grants nothing to either of Lake's accounts, and argues why.
 ///
+/// `lake_api` does hold two transport-grain grants for a Go handler
+/// (`malbeclabs/infra#3245`), recorded with that account in infra and named in
+/// `012`'s prose; what stays out of this file is any statement naming it.
+///
 /// The grant was written and reverted, so the absence is a decision and the
 /// paragraph beside it is the decision's record. Two halves, and each fails
 /// differently if it goes missing. `lake_api` is the connection Lake's own Go
@@ -4088,8 +4092,12 @@ fn the_reader_file_grants_nothing_to_lake_and_says_why() {
     );
 }
 
-/// `012` records the three grants the live cluster holds and the statements
+/// `012` records the three grants the live cluster held and the statements
 /// that remove them.
+///
+/// They were probably dropped when `lake_api` was recreated on 2026-10-06, but
+/// that is inferred, not checked, so the record stays until an administrator's
+/// `SHOW GRANTS` retires it.
 ///
 /// Re-applying this file replays a grant and revokes nothing, so the block of
 /// `GRANT`s is not the state of Lake's access on the cluster where the reverted
@@ -4490,4 +4498,47 @@ fn the_venue_file_states_the_delete_a_corrected_re_derivation_needs() {
         sql.contains("A REPLACE IS NOT A DELETE"),
         "the file does not say why a re-load is not enough on its own"
     );
+}
+
+/// `013`'s two views number and pair within one feed.
+///
+/// Where two feeds share a `Channel ID` at one observation, a partition or a
+/// grouping without `feed` numbers their states as one sequence and pairs one
+/// feed's with the other's. The container suite shows the rows; this holds the
+/// text, so the two clauses cannot lose the column without a test saying so.
+#[test]
+fn the_pairing_views_key_on_feed() {
+    let sql = migration("013_recorder_book_top_feed.sql").sql;
+
+    let occurrence = view_body(sql, "book_top_occurrence");
+    let partition = occurrence
+        .split("PARTITION BY")
+        .nth(1)
+        .and_then(|rest| rest.split("ORDER BY").next())
+        .expect("the ordinal's window has a partition");
+    assert!(
+        partition.contains("b.observation, b.feed,"),
+        "`feed` is not in the ordinal's partition, after `observation`: {partition}"
+    );
+
+    let race = view_body(sql, "book_top_race");
+    let grouping = race.split("GROUP BY").nth(1).expect("the race groups");
+    assert!(
+        grouping.trim_start().starts_with("feed,"),
+        "`feed` does not lead the race's grouping: {grouping}"
+    );
+    let select = race.split("SELECT").nth(1).expect("the race selects");
+    assert!(
+        select.trim_start().starts_with("feed,"),
+        "`feed` is not the race's first column: {select}"
+    );
+
+    // Views only. A table or a grant here would be a different file's job, and
+    // the header says why the table does not change.
+    for statement in migration("013_recorder_book_top_feed.sql").statements() {
+        assert!(
+            statement.contains("CREATE OR REPLACE VIEW"),
+            "`013` holds a statement that is not a view: {statement}"
+        );
+    }
 }
