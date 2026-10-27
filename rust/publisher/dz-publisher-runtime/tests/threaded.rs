@@ -283,7 +283,7 @@ fn metrics() -> Arc<PublisherMetrics> {
         source_id: 41,
         port_roles: &[PortRole::Mktdata],
         connections: &["a", "b"],
-        channel_ids: &[],
+        channels: &[],
         ingress_message_types: &["m"],
     }))
 }

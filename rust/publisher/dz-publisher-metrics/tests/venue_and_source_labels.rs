@@ -10,7 +10,7 @@ fn every_family_carries_venue_and_source_id() {
         source_id: 42,
         port_roles: &[dz_edge_core::PortRole::Mktdata],
         connections: &[],
-        channel_ids: &[],
+        channels: &[],
         ingress_message_types: &[],
     });
 
