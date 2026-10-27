@@ -22,7 +22,7 @@ fn metrics() -> Arc<PublisherMetrics> {
         source_id: harness::SOURCE_ID,
         port_roles: &[dz_edge_core::PortRole::Mktdata],
         connections: &["upstream"],
-        channel_ids: &[harness::CHANNEL_ID],
+        channels: &[("top-of-book", harness::CHANNEL_ID)],
         ingress_message_types: &["quote"],
     }))
 }

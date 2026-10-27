@@ -530,7 +530,7 @@ fn compose_and_run(
             source_id: identity.source_id.get(),
             port_roles: &config.port_roles(),
             connections: &connections,
-            channel_ids: &config.channel_ids(),
+            channels: &config.channels(),
             ingress_message_types: &message_types,
         },
         venue_collectors,
@@ -2283,7 +2283,7 @@ mod tests {
                 source_id: 1,
                 port_roles: &[],
                 connections: &[],
-                channel_ids: &[],
+                channels: &[],
                 ingress_message_types: &[],
             },
             Vec::new(),
@@ -2402,7 +2402,7 @@ mod tests {
             source_id: 1,
             port_roles: &[dz_edge_core::PortRole::Mktdata],
             connections: &["primary"],
-            channel_ids: &[0],
+            channels: &[("top-of-book", 0)],
             ingress_message_types: &["A-B"],
         })
     }

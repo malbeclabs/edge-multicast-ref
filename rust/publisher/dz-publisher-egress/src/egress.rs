@@ -387,13 +387,14 @@ impl<F: Feed, S: DatagramSink> ChannelEgress<F, S> {
             if message_type == EgressMessageType::Heartbeat && self.sink.reached_wire() {
                 egress.set_heartbeat_last_sent(
                     port_role,
+                    F::NAME,
                     channel_id,
                     send_timestamp_ns as f64 / 1e9,
                 );
             }
         }
         if let Some(sequence_number) = sequence_number {
-            egress.set_sequence(port_role, channel_id, sequence_number);
+            egress.set_sequence(port_role, F::NAME, channel_id, sequence_number);
         }
         Ok(())
     }

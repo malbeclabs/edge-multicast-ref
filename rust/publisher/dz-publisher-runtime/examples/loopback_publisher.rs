@@ -184,7 +184,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         source_id: SOURCE_ID,
         port_roles: &[PortRole::Mktdata, PortRole::Refdata],
         connections: &["fixture"],
-        channel_ids: &[CHANNEL_ID],
+        channels: &[(<TopOfBook as dz_edge_core::Feed>::NAME, CHANNEL_ID)],
         ingress_message_types: &["fixture"],
     }));
 

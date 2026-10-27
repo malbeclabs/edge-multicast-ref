@@ -125,13 +125,16 @@ fn metrics_for(feeds: &[Feed]) -> Arc<PublisherMetrics> {
             }
         }
     }
-    let channel_ids: Vec<u8> = feeds.iter().map(|feed| feed.channel_id).collect();
+    let channels: Vec<(&str, u8)> = feeds
+        .iter()
+        .map(|feed| (feed.spec.as_str(), feed.channel_id))
+        .collect();
     Arc::new(PublisherMetrics::new(&PublisherMetricsConfig {
         venue: "a-venue",
         source_id: identity.source_id.get(),
         port_roles: &port_roles,
         connections: &["upstream"],
-        channel_ids: &channel_ids,
+        channels: &channels,
         ingress_message_types: &["quote"],
     }))
 }

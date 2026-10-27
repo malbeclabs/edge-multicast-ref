@@ -378,6 +378,37 @@ pub fn race_fixture(base: u64) -> RowBatch {
     }
 }
 
+/// The tops two feeds sharing one `Channel ID` would load: each `(observation,
+/// feed, offset)` is one row on Channel ID `1`, instrument `11`, all of one
+/// `state_key`, the key an empty top carries on both feeds.
+///
+/// Each row has its own `Sequence Number`, as two channel instances' would, so
+/// `book_top`'s sort key, which has no feed, keeps every one.
+pub fn two_feeds_on_one_channel(base: u64, rows: &[(&str, &str, u64)]) -> RowBatch {
+    let book_top = rows
+        .iter()
+        .enumerate()
+        .map(|(index, &(observation, feed, offset_ms))| {
+            let site = if observation == "a" { "one" } else { "two" };
+            let mut row = top(observation, site, base, offset_ms, REPEATED, REPEATED_BOOK);
+            row.feed = feed.to_owned();
+            row.sequence_number = 5_000 + index as u64;
+            row
+        })
+        .collect();
+    RowBatch {
+        object_key: "object".to_owned(),
+        object_sha256: "sha".to_owned(),
+        derivation: Derivation::Archive,
+        era: vec![
+            opening("one", base - 5_000_000),
+            opening("two", base - 3_000_000),
+        ],
+        book_top,
+        ..RowBatch::default()
+    }
+}
+
 pub fn now_ns() -> u64 {
     u64::try_from(
         std::time::SystemTime::now()

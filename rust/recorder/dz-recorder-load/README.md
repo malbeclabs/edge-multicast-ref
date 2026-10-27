@@ -267,6 +267,13 @@ was, and a snapshot cycle is `total_levels` messages per instrument on the
 publisher's cadence rather than on the market's. A switch whose blast radius is
 every feed on the host is a switch nobody turns on.
 
+**Two named feeds may share a `Channel ID`.** `tob_edge_binance_spot` and
+`tob_edge_phoenix` do, and a publisher's two feeds on one shard may as well.
+`book_top`'s sort key has no feed, and a `Channel ID` and an `Instrument ID` name
+an instrument within one feed, so a query over `book_top` or
+`book_top_settled` about one instrument filters on `feed`. The pairing views
+number and pair within one feed from `013` on.
+
 **`persist_snapshot_levels` decides rows and never state.** The book consumes
 every level either way — skipping one before the book has seen it leaves a cycle
 that never completes, so nothing ever anchors, which is the one thing consuming
