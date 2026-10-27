@@ -1,6 +1,6 @@
 # A multicast transport, and the silence it has to notice
 
-**Status:** draft, pending review
+**Status:** proposed, in review
 **Applies to:** `rust/ingress/`, venue publisher repositories
 **Authority:** [`edge-feed-spec`](https://github.com/malbeclabs/edge-feed-spec), its [`GLOSSARY.md`](https://github.com/malbeclabs/edge-feed-spec/blob/main/GLOSSARY.md) and [`VERSIONING.md`](https://github.com/malbeclabs/edge-feed-spec/blob/main/VERSIONING.md)
 **Builds on:** [2026-09-02-venue-adapter-interface-design.md](2026-09-02-venue-adapter-interface-design.md), [2026-08-26-edge-publisher-crates-design.md](2026-08-26-edge-publisher-crates-design.md), [2026-09-09-session-transport-design.md](2026-09-09-session-transport-design.md), [2026-09-09-polled-transport-design.md](2026-09-09-polled-transport-design.md)
@@ -556,7 +556,7 @@ give one term two meanings in one publisher.
 
 ### 2. `connection` on `reconnects_total` and `connect_failures_total`
 
-**Proposal: add it to both.**
+**Proposal: add it to both.** Filed as #230.
 
 The test that forbids it gives the reason, and the reason is sound: "a label
 that is not a dimension of what is being counted multiplies the series for
@@ -570,12 +570,14 @@ another render identically today. The sibling property the test protects is
 preserved by adding the label to both.
 
 `reconnect` and `connect_failure` take only a reason today, so both signatures
-change, and with them the metrics crate and the four `IngressObserver` impls in
-the driver and loopback tests. `connection: &'static str` is already the
-parameter `message` and `connection_state` carry, so the change adds no new
-shape to the trait. Pre-creation follows the existing cross-product: N
-connections against `DisconnectReason::ALL` and against
-`ConnectFailureReason`'s values, which for three groups is twelve and
+change, and with them the metrics crate and the six `IngressObserver` impls:
+`dz-publisher-runtime`'s `observer.rs` and `threaded.rs`, and the driver and
+loopback tests in `dz-ingress-core`, `dz-ingress-fix`, `dz-ingress-poll` and
+`dz-ingress-websocket`. `connection: &'static str` is already the parameter
+`message` and `connection_state` carry, so the change adds no new shape to the
+trait. Pre-creation follows the existing cross-product: N connections against
+`DisconnectReason::ALL`, which holds four variants, and against
+`ConnectFailureReason`, which holds seven. Three groups is twelve and
 twenty-one series.
 
 Without this, the only per-group signal is `connection_state{connection}`, and
