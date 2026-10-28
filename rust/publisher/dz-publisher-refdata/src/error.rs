@@ -1,6 +1,6 @@
 //! Why a publisher's reference data will not start.
 
-use crate::state::RecordError;
+use crate::state::{IdAllocation, RecordError, VenueKeys};
 use crate::store::StateError;
 
 /// The startup failures, none of which is recoverable by continuing.
@@ -81,7 +81,7 @@ pub enum RefdataError {
     /// and under a fresh derivation on the other. The document check refuses
     /// this first; this is the second line, for a caller composing the
     /// configuration itself.
-    #[error("derived Instrument ID allocation forgets nothing, so it cannot be combined with forget_delisted_after")]
+    #[error("derived Instrument ID allocation, from the Symbol or the venue key, forgets nothing, so it cannot be combined with forget_delisted_after")]
     ForgettingUnderDerivedIds,
 
     /// The record was written under derived allocation and the configuration
@@ -92,4 +92,76 @@ pub enum RefdataError {
     /// keeps every published ID, so there is none here.
     #[error("the persisted state was written under derived Instrument ID allocation, and sequential allocation cannot continue it")]
     StateIsDerived,
+
+    /// `venue_keys = "stated"` was configured under `identity = "symbol"`.
+    ///
+    /// The symbol identity ignores every venue key, so a declaration that the
+    /// adapter states its own would be read by nothing. The document check
+    /// refuses this first; this is the second line.
+    #[error("venue_keys = \"stated\" declares keys that identity = \"symbol\" never reads")]
+    VenueKeysWithoutVenueKey,
+
+    /// `id_allocation = "derived_key"` was configured under
+    /// `identity = "symbol"`, where there is no key to derive from.
+    #[error("id_allocation = \"derived_key\" derives from a venue key, and identity = \"symbol\" has none")]
+    DerivedKeyWithoutVenueKey,
+
+    /// `id_allocation = "derived"` was configured with `venue_keys = "stated"`.
+    ///
+    /// `"derived"` takes a new key's ID from its display `Symbol`, which a
+    /// venue stating its own keys may rename under the same key. A host that
+    /// admitted the key before a rename and one starting from no record after
+    /// it would publish one instrument under two IDs. `"derived_key"` derives
+    /// from the key, which a rename leaves alone. The document check refuses
+    /// this first; this is the second line.
+    #[error("id_allocation = \"derived\" derives from a Symbol that venue_keys = \"stated\" lets the venue rename; use id_allocation = \"derived_key\"")]
+    DerivedWithStatedVenueKeys,
+
+    /// The record was written under one derived allocation and the
+    /// configuration asks for the other.
+    ///
+    /// `derived` hashes the `Symbol` and `derived_key` the venue key, so every
+    /// derived ID above the floor would change, and a subscriber's books with
+    /// them.
+    #[error("the persisted state was written under id_allocation {persisted:?}, and {configured:?} derives different IDs")]
+    DerivationChanged {
+        persisted: IdAllocation,
+        configured: IdAllocation,
+    },
+
+    /// The record is keyed, version 4, and the configuration asks for the
+    /// symbol identity.
+    ///
+    /// Its entries may share a `Symbol`, and a registry that recalls by the
+    /// `Symbol` cannot hold two instruments under one.
+    #[error("the persisted state is keyed by venue key, and identity = \"symbol\" cannot read it")]
+    StateIsKeyed,
+
+    /// The record was written under one `venue_keys` declaration and the
+    /// configuration states the other.
+    ///
+    /// Under `symbol` every `-` entry is "the key is the Symbol", which an
+    /// adapter stating its own keys would never offer; under `stated` the
+    /// reverse. Either way every offer would miss and be given a new ID. There
+    /// is no way back that keeps the IDs: a fresh record is the only path.
+    #[error(
+        "the persisted state was written under venue_keys = {persisted:?}, not {configured:?}"
+    )]
+    VenueKeysChanged {
+        persisted: VenueKeys,
+        configured: VenueKeys,
+    },
+
+    /// An unkeyed record holds entries whose venue key is not known, and the
+    /// configuration recalls by venue key.
+    ///
+    /// Each could stand for its exact `Symbol` or for a longer name that was
+    /// cut, or under `venue_keys = "stated"` for any key at all. Giving the ID
+    /// to whichever key is offered first depends on what one host saw first,
+    /// so the record opens only after a mapping resolves them through
+    /// [`seed`](crate::seed()). Each entry is named by its ID and `Symbol`.
+    #[error("{} entries of the persisted state have no known venue key; resolve them with a seed mapping", entries.len())]
+    UnresolvedVenueKeys {
+        entries: Vec<(u32, [u8; dz_edge_refdata::SYMBOL_LEN])>,
+    },
 }

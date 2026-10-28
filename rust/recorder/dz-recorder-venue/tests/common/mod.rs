@@ -173,6 +173,7 @@ impl Adapter for FixtureAdapter {
         for listing in &self.listings {
             let spec = InstrumentSpec {
                 symbol: &listing.symbol,
+                venue_key: None,
                 leg1: None,
                 leg2: None,
                 asset_class: AssetClass::CryptoSpot,

@@ -60,6 +60,16 @@ pub struct InstrumentSpec<'a> {
     /// this boundary, so an adapter states the symbol it has and does not
     /// count bytes.
     pub symbol: &'a str,
+    /// The venue's own name for this instrument, where it is not
+    /// [`symbol`](Self::symbol).
+    ///
+    /// `None` means the key is the stated `symbol`, **untruncated**, which is
+    /// right for a venue whose ticker is both its display name and its key. A
+    /// key is between 1 and 256 bytes and holds no NUL, and it never goes on
+    /// the wire. The runtime reads it only when its reference data recalls
+    /// instruments by venue key (`[refdata] identity = "venue_key"`), and then
+    /// two instruments may share a truncated `Symbol` but never a key.
+    pub venue_key: Option<&'a str>,
     /// The first leg of a multi-leg instrument, if it has one.
     pub leg1: Option<&'a str>,
     /// The second leg of a multi-leg instrument, if it has one.

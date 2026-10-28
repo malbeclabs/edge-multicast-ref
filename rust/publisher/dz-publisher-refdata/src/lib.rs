@@ -66,6 +66,7 @@ pub mod pacer;
 pub mod policy;
 pub mod refusal;
 pub mod registry;
+pub mod seed;
 pub mod state;
 pub mod store;
 pub mod strike;
@@ -81,8 +82,10 @@ pub use registry::{
     Counts, PublishedDefinition, Registry, RegistryConfig, ShardConfig, UnavailableId,
     COMPACTION_FLOOR,
 };
+pub use seed::{seed, Seed, SeedError};
 pub use state::{
-    derive_instrument_id, encode_line, Entry, IdAllocation, Loaded, RecordError, StateRecord,
-    FIRST_INSTRUMENT_ID,
+    derive_instrument_id, derive_instrument_id_from_key, encode_keyed_line, encode_line,
+    is_venue_key, symbol_is_whole, unpadded, venue_key_field, Entry, IdAllocation, Identity,
+    Loaded, RecordError, StateRecord, VenueKeys, FIRST_INSTRUMENT_ID, MAX_VENUE_KEY_LEN,
 };
 pub use store::{MemoryStore, StateError, StateStore};

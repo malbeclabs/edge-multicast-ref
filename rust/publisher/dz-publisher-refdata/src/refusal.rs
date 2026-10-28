@@ -161,6 +161,24 @@ pub enum Refusal {
     #[error("a strike was stated for an instrument already published without one")]
     StrikePresence,
 
+    /// Under `identity = "venue_key"`, the offer's venue key is empty, over
+    /// 256 bytes, or holds a NUL.
+    ///
+    /// Refused rather than truncated, because a truncated key would merge two
+    /// instruments again, which is what the key is for.
+    #[error("the venue key is empty, over 256 bytes, or holds a NUL")]
+    BadVenueKey,
+
+    /// Under `venue_keys = "symbol"`, the offer states a venue key that
+    /// differs from its `symbol`.
+    ///
+    /// The declaration says every key is the stated symbol, and the open read
+    /// the record by it. An adapter that started stating its own keys without
+    /// declaring it would otherwise be handed a new `Instrument ID` for every
+    /// instrument it has, with the old ones held and never recalled.
+    #[error("the offer states a venue key, and venue_keys does not declare stated keys")]
+    VenueKeyNotDeclared,
+
     /// The `Instrument ID` space is exhausted.
     ///
     /// Unreachable in practice and refused rather than wrapped: the next ID
