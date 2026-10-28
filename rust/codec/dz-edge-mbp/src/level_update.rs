@@ -79,6 +79,7 @@ impl AppMessage for LevelUpdate {
     const TYPE_ID: u8 = 0x40;
     const SIZE: usize = 48;
     const PORT_ROLES: &'static [PortRole] = &[PortRole::Mktdata];
+    const FEED_LOCAL: Option<u16> = Some(crate::MAGIC_MBP);
 
     fn encode_into(&self, dst: &mut [u8]) {
         debug_assert_eq!(dst.len(), Self::SIZE);
