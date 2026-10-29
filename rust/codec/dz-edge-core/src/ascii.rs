@@ -43,8 +43,8 @@ pub enum Fit {
 /// is reported as `Fit::Unrepresentable` rather than `Fit::Fitted` or
 /// `Fit::Truncated`, so the caller can decide what to do about it.
 ///
-/// The specification also asks a publisher for Normalization Form C. That is
-/// not done here: normalizing changes the bytes, and a caller that keys an
+/// The specification also asks a publisher to write Unicode NFC. That is not
+/// done here: converting to NFC changes the bytes, and a caller that keys an
 /// identity on them has to decide when that change happens.
 #[must_use]
 pub fn pad_text<const N: usize>(value: &str) -> ([u8; N], Fit) {
