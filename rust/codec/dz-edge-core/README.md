@@ -50,7 +50,7 @@ The walk is infallible once the header validates and yields unknown type IDs rat
 | `message` | `AppMessage` |
 | `port_role` | `PortRole` — `mktdata`, `refdata`, `snapshot` |
 | `fixed_point` | Decimal to scaled integer |
-| `ascii` | `pad_ascii`, `Fit` for fixed-width symbol fields |
+| `ascii` | `pad_text` (and its old name `pad_ascii`), `Fit` for `char[N]` UTF-8 text fields |
 | `heartbeat`, `end_of_session` | Control messages every feed carries |
 | `constants` | Sizes, schema versions, type IDs, flags |
 | `error`, `encode_error` | `DecodeError`, `EncodeError` |

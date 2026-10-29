@@ -363,10 +363,11 @@ fn set_symbol_reports_truncated_for_an_over_long_ascii_value() {
 }
 
 #[test]
-fn set_symbol_reports_unrepresentable_for_a_non_ascii_value() {
+fn set_symbol_fits_a_non_ascii_value_as_utf8() {
     let mut d = sample();
     let fit = d.set_symbol("BTC-USDT\u{e9}");
-    assert_eq!(fit, Fit::Unrepresentable);
+    assert_eq!(fit, Fit::Fitted);
+    assert_eq!(&d.symbol[..10], "BTC-USDT\u{e9}".as_bytes());
 }
 
 #[test]

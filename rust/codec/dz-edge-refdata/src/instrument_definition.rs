@@ -1,5 +1,5 @@
 use dz_edge_core::{
-    pad_ascii, AppMessage, DecodeError, Fit, PortRole, SCHEMA_VERSION, SCHEMA_VERSION_V1,
+    pad_text, AppMessage, DecodeError, Fit, PortRole, SCHEMA_VERSION, SCHEMA_VERSION_V1,
 };
 
 pub const SYMBOL_LEN: usize = 64;
@@ -238,29 +238,29 @@ impl InstrumentDefinition {
     }
 
     /// Set `symbol` from a string, NUL-padding or truncating it to fit
-    /// `SYMBOL_LEN`, reporting whether the value fit as ASCII.
+    /// `SYMBOL_LEN`, reporting whether the value fit as `char[N]` text.
     ///
     /// A publisher should call this (and `set_leg1`/`set_leg2`) once per
     /// reference-data load and log any non-`Fitted` result, rather than
     /// silently encoding a value the field cannot honestly represent.
     pub fn set_symbol(&mut self, value: &str) -> Fit {
-        let (field, fit) = pad_ascii::<SYMBOL_LEN>(value);
+        let (field, fit) = pad_text::<SYMBOL_LEN>(value);
         self.symbol = field;
         fit
     }
 
     /// Set `leg1` from a string, NUL-padding or truncating it to fit
-    /// `LEG_LEN`, reporting whether the value fit as ASCII.
+    /// `LEG_LEN`, reporting whether the value fit as `char[N]` text.
     pub fn set_leg1(&mut self, value: &str) -> Fit {
-        let (field, fit) = pad_ascii::<LEG_LEN>(value);
+        let (field, fit) = pad_text::<LEG_LEN>(value);
         self.leg1 = field;
         fit
     }
 
     /// Set `leg2` from a string, NUL-padding or truncating it to fit
-    /// `LEG_LEN`, reporting whether the value fit as ASCII.
+    /// `LEG_LEN`, reporting whether the value fit as `char[N]` text.
     pub fn set_leg2(&mut self, value: &str) -> Fit {
-        let (field, fit) = pad_ascii::<LEG_LEN>(value);
+        let (field, fit) = pad_text::<LEG_LEN>(value);
         self.leg2 = field;
         fit
     }

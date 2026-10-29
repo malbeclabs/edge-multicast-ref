@@ -311,7 +311,7 @@ impl ArchivedRefdata {
     /// The instrument this symbol was published as, if the archive says.
     #[must_use]
     pub fn by_symbol(&self, symbol: &str) -> Option<&ArchivedInstrument> {
-        let (field, _fit) = dz_edge_core::pad_ascii::<SYMBOL_LEN>(symbol);
+        let (field, _fit) = dz_edge_core::pad_text::<SYMBOL_LEN>(symbol);
         self.by_symbol.get(&field)
     }
 

@@ -2,46 +2,54 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fit {
     Fitted,
-    /// The value exceeded the field and was truncated to it. The specification
-    /// permits this, but a publisher should report it once per reference-data
-    /// load rather than silently or per message.
+    /// The value exceeded the field and was truncated to it, at a code point
+    /// boundary. The specification permits this, but a publisher should report
+    /// it once per reference-data load rather than silently or per message.
     Truncated,
-    /// The value cannot be honestly represented in this field: it contains
-    /// bytes outside ASCII, or an interior NUL byte that would truncate it
-    /// for any reader treating the field as NUL-terminated.
+    /// The value cannot be honestly represented in this field: it contains an
+    /// interior NUL byte. The specification ends the text at the first NUL, so a
+    /// reader would see a shorter value than the one written.
     ///
-    /// The specification describes these fields as NUL-padded ASCII. A value
-    /// that violates this is still encoded - padded or truncated as usual -
-    /// but reported here instead of silently accepted, so a publisher can
-    /// count and log it once per reference-data load.
+    /// The value is still encoded - padded or truncated as usual - but reported
+    /// here instead of silently accepted, so a publisher can count and log it
+    /// once per reference-data load.
     ///
-    /// Takes precedence over `Truncated` when a value is both unrepresentable
-    /// (non-ASCII or NUL-containing) and too long: whether the field also had
-    /// to be truncated is secondary to the fact that its contents cannot be
-    /// trusted as ASCII.
+    /// Takes precedence over `Truncated` when a value is both: whether the field
+    /// also had to be truncated is secondary to the fact that a reader cannot
+    /// recover what was written.
+    ///
+    /// Bytes above `0x7F` are not a reason. `char[N]` is UTF-8 text
+    /// (edge-feed-spec#104), and a `&str` is always valid UTF-8.
     Unrepresentable,
 }
 
-/// Left-justify `value` into an `N`-byte field, NUL-padded, reporting whether it
-/// had to be truncated, and whether it can be honestly represented as NUL-padded ASCII.
+/// Left-justify `value` into an `N`-byte `char[N]` field, NUL-padded, reporting
+/// whether it had to be truncated, and whether it can be honestly represented.
+///
+/// `char[N]` is UTF-8 text, left-justified and NUL-padded. A `&str` is valid
+/// UTF-8 by construction, so what is left to check is length and an interior
+/// NUL.
 ///
 /// NUL and not space: the specification says these fields are null-padded, and a
 /// space-padded value decodes to a different symbol.
 ///
 /// Truncation cuts at `N` bytes, but never splits a multi-byte UTF-8 sequence:
 /// if the byte at the cut point is a continuation byte, the cut backs up to the
-/// nearest character boundary so the field never contains half a code point.
+/// nearest character boundary so the field never contains half a code point,
+/// which the specification requires.
 ///
-/// The specification describes these fields as NUL-padded ASCII. A value that
-/// contains bytes outside ASCII or an interior NUL byte (which would truncate
-/// the field for any reader that treats it as NUL-terminated) is still encoded -
-/// this function never panics and never returns an error - but is reported as
-/// `Fit::Unrepresentable` rather than `Fit::Fitted` or `Fit::Truncated`, so
-/// the caller can decide what to do about it.
+/// A value with an interior NUL byte (which ends the text for every reader) is
+/// still encoded - this function never panics and never returns an error - but
+/// is reported as `Fit::Unrepresentable` rather than `Fit::Fitted` or
+/// `Fit::Truncated`, so the caller can decide what to do about it.
+///
+/// The specification also asks a publisher to write Unicode NFC. That is not
+/// done here: converting to NFC changes the bytes, and a caller that keys an
+/// identity on them has to decide when that change happens.
 #[must_use]
-pub fn pad_ascii<const N: usize>(value: &str) -> ([u8; N], Fit) {
+pub fn pad_text<const N: usize>(value: &str) -> ([u8; N], Fit) {
     let bytes = value.as_bytes();
-    let not_ascii = !value.is_ascii() || bytes.contains(&0);
+    let interior_nul = bytes.contains(&0);
 
     let (field, truncated) = if bytes.len() <= N {
         let mut field = [0u8; N];
@@ -57,7 +65,7 @@ pub fn pad_ascii<const N: usize>(value: &str) -> ([u8; N], Fit) {
         (field, true)
     };
 
-    let fit = if not_ascii {
+    let fit = if interior_nul {
         Fit::Unrepresentable
     } else if truncated {
         Fit::Truncated
@@ -65,4 +73,13 @@ pub fn pad_ascii<const N: usize>(value: &str) -> ([u8; N], Fit) {
         Fit::Fitted
     };
     (field, fit)
+}
+
+/// [`pad_text`], under the name it had while `char[N]` was ASCII.
+///
+/// The same function: it no longer reports a value above `0x7F` as
+/// [`Fit::Unrepresentable`].
+#[must_use]
+pub fn pad_ascii<const N: usize>(value: &str) -> ([u8; N], Fit) {
+    pad_text::<N>(value)
 }

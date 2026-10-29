@@ -328,7 +328,7 @@ impl ListingSink for Admissions<'_> {
     /// be re-deciding reference data the capture has already settled — which is
     /// the one thing a re-lowering must not do.
     fn list_on(&mut self, _shard: &str, spec: &InstrumentSpec<'_>) -> Option<InstrumentRef> {
-        let (field, _fit) = dz_edge_core::pad_ascii::<SYMBOL_LEN>(spec.symbol);
+        let (field, _fit) = dz_edge_core::pad_text::<SYMBOL_LEN>(spec.symbol);
 
         // Already admitted, and still admitted: the same handle, so an adapter
         // may re-offer its whole set on every poll.
