@@ -76,7 +76,7 @@ impl Fits {
 /// by this alone.
 #[must_use]
 pub fn symbol_field(ticker: &str) -> ([u8; SYMBOL_LEN], Fit) {
-    dz_edge_core::pad_ascii::<SYMBOL_LEN>(ticker)
+    dz_edge_core::pad_text::<SYMBOL_LEN>(ticker)
 }
 
 /// Compose a definition, or refuse the instrument.

@@ -19,7 +19,7 @@ pub mod message;
 pub mod port_role;
 pub mod walk;
 
-pub use ascii::{pad_ascii, Fit};
+pub use ascii::{pad_ascii, pad_text, Fit};
 pub use channel::{ChannelSequence, ResetCount};
 pub use constants::*;
 pub use datagram::{DatagramBuilder, DatagramHeader};
