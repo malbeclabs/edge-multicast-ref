@@ -150,6 +150,41 @@ fn an_upstream_resuming_after_a_silent_window_restarts_the_idle_guards_window() 
 }
 
 #[test]
+fn a_resume_that_arrives_as_a_burst_does_not_fire_one_window_later() {
+    // A venue answers the subscription after its break with one snapshot per
+    // listing, microseconds apart, none of which publishes, then goes quiet
+    // until the listings open. The window starts at the burst's first
+    // message; a tick one window later that lands inside the burst's width
+    // must not read the burst's tail as an upstream still delivering.
+    let mut h = guarded();
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = adapter.handles()[0];
+    h.publisher.upstream_message("quote");
+    h.publisher.arrive(harness::quote(instrument, 1));
+    h.clock.advance(Duration::from_secs(2 * 3600));
+    assert!(h.publisher.tick().is_none(), "the break is quiet");
+
+    let gap = Duration::from_micros(10);
+    for _ in 0..5 {
+        h.publisher.upstream_message("snapshot");
+        h.clock.advance(gap);
+    }
+    // The clock is now 50 us past the burst's head and 10 us past its tail.
+    // One window after the head, plus 20 us: inside the burst's width.
+    h.clock.advance(WINDOW - Duration::from_micros(30));
+    assert!(
+        h.publisher.tick().is_none(),
+        "the resume's own burst fired the guard one window later"
+    );
+
+    // The upstream is still delivering after the adapter's window, and
+    // nothing has been published: that is the failure, and it fires.
+    h.publisher.upstream_message("snapshot");
+    assert_eq!(h.publisher.tick(), Some(Exit::IdleGuard));
+}
+
+#[test]
 fn publishing_resets_the_idle_guards_window() {
     let mut h = guarded();
     let mut adapter = FakeAdapter::new(&["A-B"]);

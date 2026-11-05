@@ -120,6 +120,21 @@ pub enum Upstream {
 /// That upstream is indistinguishable from a quiet venue by these two
 /// timestamps alone, and a quiet venue is the case the guard must not fire on.
 ///
+/// # Delivering means after the window, not only inside it
+///
+/// The upstream reads as delivering only for a message at least one window
+/// after the instant the silence is counted from. A resume is rarely one
+/// message: a venue answers a subscription with a burst, one snapshot per
+/// listing, and the window starts at the burst's first message. Reading the
+/// upstream as delivering from any message inside the last window would count
+/// the burst's tail, so a tick one window after the burst's head, and within
+/// its width, would fire on a venue that went quiet again after answering.
+/// Asking for a message after the adapter's whole window is the conjunction
+/// as it is meant: the upstream is *still* delivering once the adapter has
+/// had its window, and nothing has been published. A publisher that is
+/// failing is fed for as long as it fails, so this costs it at most the gap
+/// to its next upstream message.
+///
 /// # Recording, and the two metrics that go with it
 ///
 /// [`published`](Self::published) also sets
@@ -210,10 +225,10 @@ impl IdleGuard {
     /// Whether the guard has fired, and what the upstream was doing.
     ///
     /// Returns [`Exit::IdleGuard`] only for the conjunction: the publish
-    /// silence has reached the window **and** the upstream delivered inside it.
-    /// The publish silence is counted from the last publication, or from when
-    /// the upstream last resumed after a silence longer than the window, if
-    /// that is later.
+    /// silence has reached the window **and** the upstream delivered inside it,
+    /// with a message at least one window after the silence began. The publish
+    /// silence is counted from the last publication, or from when the upstream
+    /// last resumed after a silence longer than the window, if that is later.
     /// Every other combination is a publisher this guard has nothing to say
     /// about.
     #[must_use]
@@ -228,8 +243,16 @@ impl IdleGuard {
         if now_ns.saturating_sub(since) < window_ns {
             return None;
         }
+        // Delivering inside the last window, and after the adapter's own: a
+        // message from the window's start (a resume's burst) is not one the
+        // adapter has had its window for.
         let upstream = match self.last_upstream_ns {
-            Some(last) if now_ns.saturating_sub(last) < window_ns => Upstream::Delivering,
+            Some(last)
+                if now_ns.saturating_sub(last) < window_ns
+                    && last.saturating_sub(since) >= window_ns =>
+            {
+                Upstream::Delivering
+            }
             _ => Upstream::Silent,
         };
         match upstream {
