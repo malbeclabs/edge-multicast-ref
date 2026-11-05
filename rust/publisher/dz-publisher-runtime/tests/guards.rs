@@ -119,6 +119,37 @@ fn the_idle_guard_stays_quiet_before_the_first_upstream_message() {
 }
 
 #[test]
+fn an_upstream_resuming_after_a_silent_window_restarts_the_idle_guards_window() {
+    // A venue's calendar break: the last publication, then two hours with no
+    // upstream at all, then the next listing's subscription answered with an
+    // empty book, which publishes nothing. The silence was the venue's, so the
+    // window starts at the message that ended it and not at the publication
+    // before it.
+    let mut h = guarded();
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = adapter.handles()[0];
+    h.publisher.upstream_message("quote");
+    h.publisher.arrive(harness::quote(instrument, 1));
+
+    h.clock.advance(Duration::from_secs(2 * 3600));
+    assert!(h.publisher.tick().is_none(), "the break is quiet");
+
+    // Resumed, and delivering every second without publishing.
+    for second in 0..WINDOW.as_secs() {
+        h.publisher.upstream_message("snapshot");
+        assert!(
+            h.publisher.tick().is_none(),
+            "fired {second}s after the upstream resumed, inside the window"
+        );
+        h.clock.advance(Duration::from_secs(1));
+    }
+    // A whole window since it resumed, and still nothing published.
+    h.publisher.upstream_message("snapshot");
+    assert_eq!(h.publisher.tick(), Some(Exit::IdleGuard));
+}
+
+#[test]
 fn publishing_resets_the_idle_guards_window() {
     let mut h = guarded();
     let mut adapter = FakeAdapter::new(&["A-B"]);

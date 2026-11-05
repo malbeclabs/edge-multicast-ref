@@ -102,6 +102,24 @@ pub enum Upstream {
 /// adapter is no longer holding handles for — and none of those recover without
 /// a restart, which is why this one ends the process.
 ///
+/// # Silence is measured from when the upstream resumed
+///
+/// An upstream that was silent for longer than the window owed nothing for it: that
+/// is the second arm of the conjunction, and a quiet venue is healthy. So
+/// when a recognised message arrives after such a stretch, the window starts
+/// again from that message rather than from the last publication before the
+/// stretch. Without that, the first message after a long quiet period fires
+/// the guard on the next tick, before the adapter has had the window to
+/// publish anything for it. A venue whose calendar has a break in it — one
+/// that lists nothing for two hours, then answers the next listing's
+/// subscription with an empty book that publishes nothing — would end the
+/// process once per break.
+///
+/// What this gives up is an upstream that delivers less than once a window
+/// and never publishes: each message resumes the window, so it never fires.
+/// That upstream is indistinguishable from a quiet venue by these two
+/// timestamps alone, and a quiet venue is the case the guard must not fire on.
+///
 /// # Recording, and the two metrics that go with it
 ///
 /// [`published`](Self::published) also sets
@@ -123,6 +141,9 @@ pub struct IdleGuard {
     /// would fire this on a healthy publisher.
     last_upstream_ns: Option<u64>,
     last_published_ns: Option<u64>,
+    /// When the upstream last resumed after a silence longer than the window. See
+    /// *Silence is measured from when the upstream resumed*.
+    resumed_ns: Option<u64>,
     /// When the window started counting for a publisher that has published
     /// nothing yet. Startup is not silence: an adapter that has not received
     /// its first payload has nothing to have failed to publish.
@@ -137,6 +158,7 @@ impl IdleGuard {
             window,
             last_upstream_ns: None,
             last_published_ns: None,
+            resumed_ns: None,
             started_ns: None,
         }
     }
@@ -148,9 +170,23 @@ impl IdleGuard {
     /// not recognise is not data it was ever going to publish something for. A
     /// recognised message is, which is what makes the conjunction below mean
     /// what it says.
+    ///
+    /// One that arrives after a silence longer than the window — a silence
+    /// [`check`](Self::check) reads as [`Upstream::Silent`] — restarts the
+    /// window from here.
     pub fn upstream(&mut self, now_ns: u64) {
         self.started_ns.get_or_insert(now_ns);
+        if self
+            .last_upstream_ns
+            .is_some_and(|last| now_ns.saturating_sub(last) > self.window_ns())
+        {
+            self.resumed_ns = Some(now_ns);
+        }
         self.last_upstream_ns = Some(now_ns);
+    }
+
+    fn window_ns(&self) -> u64 {
+        u64::try_from(self.window.as_nanos()).unwrap_or(u64::MAX)
     }
 
     /// A message reached the wire.
@@ -175,15 +211,21 @@ impl IdleGuard {
     ///
     /// Returns [`Exit::IdleGuard`] only for the conjunction: the publish
     /// silence has reached the window **and** the upstream delivered inside it.
+    /// The publish silence is counted from the last publication, or from when
+    /// the upstream last resumed after a silence longer than the window, if
+    /// that is later.
     /// Every other combination is a publisher this guard has nothing to say
     /// about.
     #[must_use]
     pub fn check(&self, now_ns: u64) -> Option<Exit> {
-        let window_ns = u64::try_from(self.window.as_nanos()).unwrap_or(u64::MAX);
+        let window_ns = self.window_ns();
         // Before the first upstream message there is no window: a publisher
         // waiting on its first connect has published nothing and owes nothing.
-        let since_published = now_ns.saturating_sub(self.last_published_ns.or(self.started_ns)?);
-        if since_published < window_ns {
+        let published = self.last_published_ns.or(self.started_ns)?;
+        // Nor is a publication from before a silent upstream resumed: the
+        // window is the later of the two.
+        let since = published.max(self.resumed_ns.unwrap_or(0));
+        if now_ns.saturating_sub(since) < window_ns {
             return None;
         }
         let upstream = match self.last_upstream_ns {
