@@ -37,6 +37,7 @@ impl AppMessage for BookClear {
     const TYPE_ID: u8 = 0x41;
     const SIZE: usize = 36;
     const PORT_ROLES: &'static [PortRole] = &[PortRole::Mktdata];
+    const FEED_LOCAL: Option<u16> = Some(crate::MAGIC_MBP);
 
     /// The one pairing this feed forbids, refused where it is written.
     ///

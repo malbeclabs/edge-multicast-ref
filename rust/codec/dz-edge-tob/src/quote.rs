@@ -49,6 +49,7 @@ impl AppMessage for Quote {
     const TYPE_ID: u8 = 0x03;
     const SIZE: usize = 60;
     const PORT_ROLES: &'static [PortRole] = &[PortRole::Mktdata];
+    const FEED_LOCAL: Option<u16> = Some(crate::MAGIC_TOB);
 
     fn encode_into(&self, dst: &mut [u8]) {
         debug_assert_eq!(dst.len(), Self::SIZE);
