@@ -130,7 +130,7 @@ fn every_closed_label_family_renders_zero_at_construction() {
         );
     }
 
-    for reason in ["timeout", "rate_limit", "schema", "unavailable"] {
+    for reason in ["timeout", "rate_limit", "schema", "unavailable", "config"] {
         assert_zero(
             &rendered,
             "dz_publisher_refdata_load_errors_total",

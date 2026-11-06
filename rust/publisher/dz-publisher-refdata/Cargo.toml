@@ -21,4 +21,7 @@ nix = { version = "0.30", default-features = false, features = ["fs"] }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+# To read a fixture `instruments.json`, as a publisher moving onto this
+# runtime would before it seeds.
+serde_json = { workspace = true }
 tempfile = { workspace = true }

@@ -69,6 +69,7 @@ impl Adapter for Fixture {
         self.offered = true;
         self.handle = out.list(&InstrumentSpec {
             symbol: SYMBOL,
+            venue_key: None,
             leg1: None,
             leg2: None,
             asset_class: AssetClass::CryptoSpot,
@@ -289,6 +290,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             schedule: CycleSchedule::new(feed.definition_cycle, 1232, 1),
             forget_delisted_after: None,
             id_allocation: dz_publisher_refdata::IdAllocation::Sequential,
+            identity: dz_publisher_refdata::Identity::Symbol,
+            venue_keys: dz_publisher_refdata::VenueKeys::Symbol,
         },
         FileStore::new(&state_dir),
         clock.clone(),

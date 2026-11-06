@@ -243,22 +243,37 @@ impl RecoveryOutcome {
 }
 
 /// Why a reference-data load failed.
+///
+/// # One of these is a proposed addition to the normative set
+///
+/// The governing playbook fixes four values here. [`Config`](Self::Config) is
+/// a proposed fifth: an instrument declined because the adapter stated
+/// something the configuration did not declare, such as its own venue keys
+/// under `venue_keys = "symbol"`. Nothing about the instrument was wrong, so
+/// [`Schema`](Self::Schema), the nearest, would put a configuration mismatch
+/// that declines every keyed offer on the panel an operator reads as bad
+/// instrument data. The two are different fixes: one is the venue's data, the
+/// other is this publisher's configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RefdataLoadErrorReason {
     Timeout,
     RateLimit,
     Schema,
     Unavailable,
+    /// The adapter stated what the configuration did not declare. A proposed
+    /// addition; see the enum documentation.
+    Config,
 }
 
 impl RefdataLoadErrorReason {
     /// Every variant, in no particular order. Used to pre-create every
     /// child series of this closed-label family at construction.
-    pub(crate) const ALL: [Self; 4] = [
+    pub(crate) const ALL: [Self; 5] = [
         Self::Timeout,
         Self::RateLimit,
         Self::Schema,
         Self::Unavailable,
+        Self::Config,
     ];
 
     #[must_use]
@@ -268,6 +283,7 @@ impl RefdataLoadErrorReason {
             Self::RateLimit => "rate_limit",
             Self::Schema => "schema",
             Self::Unavailable => "unavailable",
+            Self::Config => "config",
         }
     }
 }
