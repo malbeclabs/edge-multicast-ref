@@ -154,6 +154,34 @@ fn an_upstream_resuming_after_a_silent_window_restarts_the_idle_guards_window() 
 }
 
 #[test]
+fn a_first_upstream_message_a_window_after_a_publication_is_a_resume() {
+    // An adapter can publish before the upstream has said anything, from its
+    // listings alone. The upstream was silent for all of that, which `check`
+    // reads as `Silent`, so the first message after a whole window of it
+    // resumes the window like any other.
+    let mut h = guarded();
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = adapter.handles()[0];
+    h.publisher.arrive(harness::quote(instrument, 1));
+
+    h.clock.advance(Duration::from_secs(2 * 3600));
+    assert!(h.publisher.tick().is_none(), "the break is quiet");
+
+    // Resumed, and delivering every second without publishing.
+    for second in 0..WINDOW.as_secs() {
+        h.publisher.upstream_message("snapshot");
+        assert!(
+            h.publisher.tick().is_none(),
+            "fired {second}s after the upstream's first message, inside the window"
+        );
+        h.clock.advance(Duration::from_secs(1));
+    }
+    h.publisher.upstream_message("snapshot");
+    assert_eq!(h.publisher.tick(), Some(Exit::IdleGuard));
+}
+
+#[test]
 fn a_message_exactly_one_window_after_the_last_is_a_resume() {
     // `check` reads the upstream as silent once a whole window has passed
     // since its last message, so the message that ends that silence resumes

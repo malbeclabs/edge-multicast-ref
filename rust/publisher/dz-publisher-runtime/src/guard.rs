@@ -188,13 +188,13 @@ impl IdleGuard {
     ///
     /// One that arrives after a silence of a whole window or more — a silence
     /// [`check`](Self::check) reads as [`Upstream::Silent`] — restarts the
-    /// window from here.
+    /// window from here. Before the first message, the silence is counted from
+    /// when the window started: a publication the adapter made from its
+    /// listings alone, with nothing from the upstream behind it.
     pub fn upstream(&mut self, now_ns: u64) {
+        let silent_since = self.last_upstream_ns.or(self.started_ns);
         self.started_ns.get_or_insert(now_ns);
-        if self
-            .last_upstream_ns
-            .is_some_and(|last| now_ns.saturating_sub(last) >= self.window_ns())
-        {
+        if silent_since.is_some_and(|since| now_ns.saturating_sub(since) >= self.window_ns()) {
             self.resumed_ns = Some(now_ns);
         }
         self.last_upstream_ns = Some(now_ns);
