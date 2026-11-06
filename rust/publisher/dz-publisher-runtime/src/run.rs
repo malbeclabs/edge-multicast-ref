@@ -1297,6 +1297,12 @@ fn report<S: StateStore, K: Clock + Clone>(
             counts.declined_unknown_shard
         );
     }
+    if counts.declined_venue_key_undeclared > 0 {
+        eprintln!(
+            "{}",
+            undeclared_venue_key_line(counts.declined_venue_key_undeclared)
+        );
+    }
     if counts.declined_shard_restated > 0 {
         eprintln!(
             "dz-publisher-runtime: {} re-offers named a different shard for an instrument \
@@ -1359,6 +1365,26 @@ const fn worth_a_line(count: u64) -> bool {
     }
 }
 
+/// Whether a count that went from `before` to `now` passed a value
+/// [`worth_a_line`] prints for.
+///
+/// For a count read once a tick rather than at each increment: one poll can
+/// decline a whole set at once, so the count may step over 10 without ever
+/// being 10 when it is read.
+const fn reached_a_new_decade(before: u64, now: u64) -> bool {
+    now > before && (before == 0 || now.ilog10() > before.ilog10())
+}
+
+/// The line for offers declined as stating a venue key the configuration did
+/// not declare.
+fn undeclared_venue_key_line(declined: u64) -> String {
+    format!(
+        "dz-publisher-runtime: {declined} offers so far stated a venue key other than their \
+         symbol, and [refdata] declares venue_keys = \"symbol\"; every such offer is declined \
+         until the adapter and the configuration agree"
+    )
+}
+
 /// Poll listings and tick until a guard fires.
 async fn tick_loop<S: StateStore, K: Clock + Clone>(
     publisher: &RefCell<Publisher<S, K>>,
@@ -1388,6 +1414,12 @@ pub(crate) struct Ticker {
     /// it comes back, and not in between: it refuses every datagram while it is
     /// down, so anything per datagram or per tick is noise.
     routes: HashMap<String, RouteState>,
+    /// The count of offers declined for stating a venue key the configuration
+    /// did not declare, as of the last tick. A line is printed when the count
+    /// reaches a new decade since then, on the schedule [`worth_a_line`]
+    /// states: the mismatch declines every keyed offer on every poll, so a
+    /// line per decline would be a line per instrument per poll.
+    undeclared_venue_keys: u64,
 }
 
 impl Ticker {
@@ -1395,6 +1427,7 @@ impl Ticker {
         Self {
             named_dropped: Vec::new(),
             routes: HashMap::new(),
+            undeclared_venue_keys: 0,
         }
     }
 
@@ -1408,6 +1441,7 @@ impl Ticker {
         let Self {
             named_dropped,
             routes,
+            undeclared_venue_keys,
         } = self;
         // One synchronous critical section, and nothing awaited inside it. See
         // the module note: a borrow held across an await here is a panic rather
@@ -1436,6 +1470,14 @@ impl Ticker {
                         eprintln!("{}", unknown_shard_line(&name, &configured));
                     }
                 }
+                // An adapter stating its own venue keys under a configuration
+                // that declares none. Every keyed offer is declined on every
+                // poll, so on the decade schedule rather than per offer.
+                let undeclared = publisher.refdata().counts().declined_venue_key_undeclared;
+                if reached_a_new_decade(*undeclared_venue_keys, undeclared) {
+                    eprintln!("{}", undeclared_venue_key_line(undeclared));
+                }
+                *undeclared_venue_keys = undeclared;
                 // An instrument declined because the ID its symbol derives is
                 // taken, zero, or below the floor. Once per symbol, as above.
                 for declined in publisher.take_unavailable_ids() {
@@ -2760,6 +2802,29 @@ mod tests {
         // order of magnitude is news.
         let printed: Vec<u64> = (0..=1_000).filter(|n| worth_a_line(*n)).collect();
         assert_eq!(printed, [1, 10, 100, 1_000]);
+    }
+
+    #[test]
+    fn a_count_read_once_a_tick_is_printed_when_it_reaches_a_new_decade() {
+        // One poll can decline a whole set, so the count can step over 10
+        // between two reads and must still be printed for it, and not again
+        // while it stays in the same decade.
+        assert!(!reached_a_new_decade(0, 0));
+        assert!(reached_a_new_decade(0, 1));
+        assert!(reached_a_new_decade(0, 37));
+        assert!(!reached_a_new_decade(1, 9));
+        assert!(reached_a_new_decade(5, 12));
+        assert!(!reached_a_new_decade(12, 12));
+        assert!(!reached_a_new_decade(12, 99));
+        assert!(reached_a_new_decade(99, 100));
+        assert!(reached_a_new_decade(3, 1_000));
+    }
+
+    #[test]
+    fn the_undeclared_venue_key_line_names_the_count_and_the_declaration() {
+        let line = undeclared_venue_key_line(42);
+        assert!(line.contains("42 offers"), "{line}");
+        assert!(line.contains("venue_keys = \"symbol\""), "{line}");
     }
 
     #[test]

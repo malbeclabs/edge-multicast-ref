@@ -519,7 +519,8 @@ fn a_key_the_configuration_did_not_declare_is_refused() {
         registry.offer("default", &spec("DISPLAY", Some("venue-1"))),
         Err(Refusal::VenueKeyNotDeclared)
     );
-    assert_eq!(registry.counts().declined_unrepresentable, 1);
+    assert_eq!(registry.counts().declined_venue_key_undeclared, 1);
+    assert_eq!(registry.counts().declined_unrepresentable, 0);
     // Stating the symbol itself is no declaration of its own keys.
     assert!(registry
         .offer("default", &spec("DISPLAY", Some("DISPLAY")))

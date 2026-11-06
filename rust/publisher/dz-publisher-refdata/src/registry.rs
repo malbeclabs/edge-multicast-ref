@@ -288,6 +288,9 @@ struct PublishedSet {
 /// - [`declined_unrepresentable`](Self::declined_unrepresentable) is a
 ///   reference-data load that did not fully load, under the load-error
 ///   family's `schema` reason.
+/// - [`declined_venue_key_undeclared`](Self::declined_venue_key_undeclared)
+///   is the same family under its `config` reason: the instrument was fine and
+///   the configuration did not expect what the adapter stated.
 ///
 /// [`declined_at_cap`](Self::declined_at_cap) maps to nothing, deliberately: it
 /// is the selection policy working, and a series that climbs whenever a venue
@@ -324,6 +327,13 @@ pub struct Counts {
     /// apart from [`declined_unrepresentable`](Self::declined_unrepresentable)
     /// because nothing about the instrument was wrong.
     pub declined_unknown_shard: u64,
+    /// Offers stating a venue key other than their `symbol` under
+    /// `venue_keys = "symbol"`; see [`Refusal::VenueKeyNotDeclared`]. Counted
+    /// apart from [`declined_unrepresentable`](Self::declined_unrepresentable)
+    /// because nothing about the instrument was wrong: the adapter and the
+    /// configuration disagree, and every keyed offer is declined until they
+    /// agree.
+    pub declined_venue_key_undeclared: u64,
     /// Re-offers naming a different shard for a published instrument. The
     /// instrument stayed where it was; see [`Refusal::ShardRestated`].
     pub declined_shard_restated: u64,
@@ -1893,12 +1903,12 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             Refusal::Capped => self.counts.declined_at_cap += 1,
             Refusal::IdUnavailable => self.counts.declined_id_unavailable += 1,
             Refusal::UnknownShard => self.counts.declined_unknown_shard += 1,
+            Refusal::VenueKeyNotDeclared => self.counts.declined_venue_key_undeclared += 1,
             Refusal::ShardRestated => self.counts.declined_shard_restated += 1,
             Refusal::StrikeUnfixed => self.counts.declined_strike_unfixed += 1,
             Refusal::StrikePresence => self.counts.declined_strike_presence += 1,
             Refusal::ContractSize
             | Refusal::BadVenueKey
-            | Refusal::VenueKeyNotDeclared
             | Refusal::Field(_)
             | Refusal::StrikeUnrepresentable
             | Refusal::StrikeEmpty

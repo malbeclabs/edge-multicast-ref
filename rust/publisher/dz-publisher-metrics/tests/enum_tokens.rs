@@ -82,6 +82,7 @@ fn refdata_load_error_reason_tokens() {
     assert_eq!(RefdataLoadErrorReason::RateLimit.as_str(), "rate_limit");
     assert_eq!(RefdataLoadErrorReason::Schema.as_str(), "schema");
     assert_eq!(RefdataLoadErrorReason::Unavailable.as_str(), "unavailable");
+    assert_eq!(RefdataLoadErrorReason::Config.as_str(), "config");
 }
 
 #[test]
