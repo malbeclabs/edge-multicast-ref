@@ -585,6 +585,8 @@ fn compose_and_run(
             schedule,
             forget_delisted_after: config.refdata.forget_delisted_after,
             id_allocation: config.refdata.id_allocation,
+            identity: config.refdata.identity,
+            venue_keys: config.refdata.venue_keys,
         },
         FileStore::new(&config.refdata.state_dir),
         clock.clone(),
@@ -1148,13 +1150,18 @@ fn unknown_shard_line(offered: &str, configured: &[String]) -> String {
 /// floor is closed to every publisher on the same seed whoever holds it, and
 /// saying otherwise sends the operator after a split that cannot exist.
 fn unavailable_id_line(declined: &UnavailableId) -> String {
-    let why = match (&declined.holder, declined.below_floor) {
+    // Under `identity = "venue_key"` the key is what was declined and what
+    // holds the ID, and two keys may share the Symbol beside them.
+    let holder = declined
+        .holder
+        .as_ref()
+        .map(|holder| named(holder, declined.holder_venue_key.as_deref()));
+    let why = match (holder, declined.below_floor) {
         (None, _) => "which is zero or below the state record's floor".to_owned(),
-        (Some(holder), true) => format!(
-            "which `{}` already holds, below the state record's floor",
-            symbol_text(holder)
-        ),
-        (Some(holder), false) => format!("which `{}` already holds", symbol_text(holder)),
+        (Some(holder), true) => {
+            format!("which {holder} already holds, below the state record's floor")
+        }
+        (Some(holder), false) => format!("which {holder} already holds"),
     };
     let other_order = if declined.holder.is_some() && !declined.below_floor {
         " A publisher of this channel that admitted the two symbols in the other order holds the \
@@ -1163,12 +1170,25 @@ fn unavailable_id_line(declined: &UnavailableId) -> String {
         ""
     };
     format!(
-        "dz-publisher-runtime: `{}` derives Instrument ID {}, {why}. It is declined and reaches no \
+        "dz-publisher-runtime: {} derives Instrument ID {}, {why}. It is declined and reaches no \
          channel. The ID is not moved, because where it would move to depends on what this \
          publisher admitted first.{other_order} Said once for this symbol.",
-        symbol_text(&declined.symbol),
+        named(&declined.symbol, declined.venue_key.as_deref()),
         declined.instrument_id,
     )
+}
+
+/// An instrument for a log line: its `Symbol`, and its venue key beside it
+/// where the registry recalls by one.
+fn named(symbol: &[u8; dz_edge_refdata::SYMBOL_LEN], venue_key: Option<&[u8]>) -> String {
+    match venue_key {
+        None => format!("`{}`", symbol_text(symbol)),
+        Some(key) => format!(
+            "venue key `{}` (Symbol `{}`)",
+            String::from_utf8_lossy(key).escape_debug(),
+            symbol_text(symbol)
+        ),
+    }
 }
 
 /// A wire `Symbol` for a log line: its trailing NUL padding trimmed, as the
@@ -1277,6 +1297,12 @@ fn report<S: StateStore, K: Clock + Clone>(
             counts.declined_unknown_shard
         );
     }
+    if counts.declined_venue_key_undeclared > 0 {
+        eprintln!(
+            "{}",
+            undeclared_venue_key_line(counts.declined_venue_key_undeclared)
+        );
+    }
     if counts.declined_shard_restated > 0 {
         eprintln!(
             "dz-publisher-runtime: {} re-offers named a different shard for an instrument \
@@ -1339,6 +1365,26 @@ const fn worth_a_line(count: u64) -> bool {
     }
 }
 
+/// Whether a count that went from `before` to `now` passed a value
+/// [`worth_a_line`] prints for.
+///
+/// For a count read once a tick rather than at each increment: one poll can
+/// decline a whole set at once, so the count may step over 10 without ever
+/// being 10 when it is read.
+const fn reached_a_new_decade(before: u64, now: u64) -> bool {
+    now > before && (before == 0 || now.ilog10() > before.ilog10())
+}
+
+/// The line for offers declined as stating a venue key the configuration did
+/// not declare.
+fn undeclared_venue_key_line(declined: u64) -> String {
+    format!(
+        "dz-publisher-runtime: {declined} offers so far stated a venue key other than their \
+         symbol, and [refdata] declares venue_keys = \"symbol\"; every such offer is declined \
+         until the adapter and the configuration agree"
+    )
+}
+
 /// Poll listings and tick until a guard fires.
 async fn tick_loop<S: StateStore, K: Clock + Clone>(
     publisher: &RefCell<Publisher<S, K>>,
@@ -1368,6 +1414,12 @@ pub(crate) struct Ticker {
     /// it comes back, and not in between: it refuses every datagram while it is
     /// down, so anything per datagram or per tick is noise.
     routes: HashMap<String, RouteState>,
+    /// The count of offers declined for stating a venue key the configuration
+    /// did not declare, as of the last tick. A line is printed when the count
+    /// reaches a new decade since then, on the schedule [`worth_a_line`]
+    /// states: the mismatch declines every keyed offer on every poll, so a
+    /// line per decline would be a line per instrument per poll.
+    undeclared_venue_keys: u64,
 }
 
 impl Ticker {
@@ -1375,6 +1427,7 @@ impl Ticker {
         Self {
             named_dropped: Vec::new(),
             routes: HashMap::new(),
+            undeclared_venue_keys: 0,
         }
     }
 
@@ -1388,6 +1441,7 @@ impl Ticker {
         let Self {
             named_dropped,
             routes,
+            undeclared_venue_keys,
         } = self;
         // One synchronous critical section, and nothing awaited inside it. See
         // the module note: a borrow held across an await here is a panic rather
@@ -1416,6 +1470,14 @@ impl Ticker {
                         eprintln!("{}", unknown_shard_line(&name, &configured));
                     }
                 }
+                // An adapter stating its own venue keys under a configuration
+                // that declares none. Every keyed offer is declined on every
+                // poll, so on the decade schedule rather than per offer.
+                let undeclared = publisher.refdata().counts().declined_venue_key_undeclared;
+                if reached_a_new_decade(*undeclared_venue_keys, undeclared) {
+                    eprintln!("{}", undeclared_venue_key_line(undeclared));
+                }
+                *undeclared_venue_keys = undeclared;
                 // An instrument declined because the ID its symbol derives is
                 // taken, zero, or below the floor. Once per symbol, as above.
                 for declined in publisher.take_unavailable_ids() {
@@ -2743,6 +2805,29 @@ mod tests {
     }
 
     #[test]
+    fn a_count_read_once_a_tick_is_printed_when_it_reaches_a_new_decade() {
+        // One poll can decline a whole set, so the count can step over 10
+        // between two reads and must still be printed for it, and not again
+        // while it stays in the same decade.
+        assert!(!reached_a_new_decade(0, 0));
+        assert!(reached_a_new_decade(0, 1));
+        assert!(reached_a_new_decade(0, 37));
+        assert!(!reached_a_new_decade(1, 9));
+        assert!(reached_a_new_decade(5, 12));
+        assert!(!reached_a_new_decade(12, 12));
+        assert!(!reached_a_new_decade(12, 99));
+        assert!(reached_a_new_decade(99, 100));
+        assert!(reached_a_new_decade(3, 1_000));
+    }
+
+    #[test]
+    fn the_undeclared_venue_key_line_names_the_count_and_the_declaration() {
+        let line = undeclared_venue_key_line(42);
+        assert!(line.contains("42 offers"), "{line}");
+        assert!(line.contains("venue_keys = \"symbol\""), "{line}");
+    }
+
+    #[test]
     fn nothing_is_printed_for_a_refusal_that_has_not_happened() {
         // The count is taken before the line, so zero means the caller asked
         // about the wrong bucket - and a line about a failure that did not
@@ -2762,6 +2847,8 @@ mod tests {
         holder[..4].copy_from_slice(b"OLDS");
         let collided = unavailable_id_line(&UnavailableId {
             symbol,
+            venue_key: None,
+            holder_venue_key: None,
             instrument_id: 77,
             holder: Some(holder),
             below_floor: false,
@@ -2780,6 +2867,8 @@ mod tests {
         // is no other order to speak of, held or not.
         let below = unavailable_id_line(&UnavailableId {
             symbol,
+            venue_key: None,
+            holder_venue_key: None,
             instrument_id: 3,
             holder: None,
             below_floor: true,
@@ -2789,6 +2878,8 @@ mod tests {
 
         let seeded = unavailable_id_line(&UnavailableId {
             symbol,
+            venue_key: None,
+            holder_venue_key: None,
             instrument_id: 3,
             holder: Some(holder),
             below_floor: true,
@@ -2798,6 +2889,27 @@ mod tests {
             "{seeded}"
         );
         assert!(!seeded.contains("other order"), "{seeded}");
+    }
+
+    #[test]
+    fn the_unavailable_id_line_names_the_venue_keys_beside_one_symbol() {
+        // Under the venue-key identity two keys may share the Symbol, so the
+        // Symbol alone would name the declined key and its holder alike.
+        let mut symbol = [0u8; dz_edge_refdata::SYMBOL_LEN];
+        symbol[..4].copy_from_slice(b"LONG");
+        let line = unavailable_id_line(&UnavailableId {
+            symbol,
+            venue_key: Some(b"LONG-TICKER-2".to_vec().into_boxed_slice()),
+            holder_venue_key: Some(b"LONG-TICKER-1".to_vec().into_boxed_slice()),
+            instrument_id: 77,
+            holder: Some(symbol),
+            below_floor: false,
+        });
+        assert!(
+            line.contains("venue key `LONG-TICKER-2` (Symbol `LONG`)")
+                && line.contains("venue key `LONG-TICKER-1`"),
+            "{line}"
+        );
     }
 
     #[test]

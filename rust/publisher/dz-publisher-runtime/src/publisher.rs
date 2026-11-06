@@ -1683,6 +1683,16 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
         {
             refdata.load_error(RefdataLoadErrorReason::Schema);
         }
+        // An offer stating a venue key the configuration did not declare. The
+        // same family under its `config` reason, because the instrument was
+        // fine: on `schema` a configuration mismatch that declines every keyed
+        // offer would read as bad instrument data.
+        for _ in 0..counts
+            .declined_venue_key_undeclared
+            .saturating_sub(self.forwarded.declined_venue_key_undeclared)
+        {
+            refdata.load_error(RefdataLoadErrorReason::Config);
+        }
         self.forwarded = counts;
 
         let published = i64::try_from(self.refdata.published()).unwrap_or(i64::MAX);

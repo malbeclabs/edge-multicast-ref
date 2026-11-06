@@ -140,6 +140,7 @@ impl Adapter for LineAdapter {
         }
         self.admitted = out.list(&InstrumentSpec {
             symbol: "EXAMPLE-1",
+            venue_key: None,
             leg1: None,
             leg2: None,
             asset_class: AssetClass::PredictionBinary,
