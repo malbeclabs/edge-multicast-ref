@@ -104,8 +104,8 @@ pub enum Upstream {
 ///
 /// # Silence is measured from when the upstream resumed
 ///
-/// An upstream that was silent for longer than the window owed nothing for it: that
-/// is the second arm of the conjunction, and a quiet venue is healthy. So
+/// An upstream that was silent for a whole window or more owed nothing for it: that
+/// is the second condition of the conjunction, and a quiet venue is healthy. So
 /// when a recognised message arrives after such a stretch, the window starts
 /// again from that message rather than from the last publication before the
 /// stretch. Without that, the first message after a long quiet period fires
@@ -156,7 +156,7 @@ pub struct IdleGuard {
     /// would fire this on a healthy publisher.
     last_upstream_ns: Option<u64>,
     last_published_ns: Option<u64>,
-    /// When the upstream last resumed after a silence longer than the window. See
+    /// When the upstream last resumed after a silence of a whole window or more. See
     /// *Silence is measured from when the upstream resumed*.
     resumed_ns: Option<u64>,
     /// When the window started counting for a publisher that has published
@@ -186,14 +186,14 @@ impl IdleGuard {
     /// recognised message is, which is what makes the conjunction below mean
     /// what it says.
     ///
-    /// One that arrives after a silence longer than the window — a silence
+    /// One that arrives after a silence of a whole window or more — a silence
     /// [`check`](Self::check) reads as [`Upstream::Silent`] — restarts the
     /// window from here.
     pub fn upstream(&mut self, now_ns: u64) {
         self.started_ns.get_or_insert(now_ns);
         if self
             .last_upstream_ns
-            .is_some_and(|last| now_ns.saturating_sub(last) > self.window_ns())
+            .is_some_and(|last| now_ns.saturating_sub(last) >= self.window_ns())
         {
             self.resumed_ns = Some(now_ns);
         }
@@ -228,7 +228,7 @@ impl IdleGuard {
     /// silence has reached the window **and** the upstream delivered inside it,
     /// with a message at least one window after the silence began. The publish
     /// silence is counted from the last publication, or from when the upstream
-    /// last resumed after a silence longer than the window, if that is later.
+    /// last resumed after a silence of a whole window or more, if that is later.
     /// Every other combination is a publisher this guard has nothing to say
     /// about.
     #[must_use]

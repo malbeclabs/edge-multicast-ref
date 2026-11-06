@@ -76,9 +76,13 @@ fn the_idle_guard_fires_with_the_idle_guard_exit_reason() {
     // follows it, because whatever the mapping was supposed to produce, it
     // produced nothing.
     h.publisher.upstream_message("quote");
+    // And still delivering, halfway through: an upstream that keeps arriving,
+    // not one that went quiet for a whole window and resumed.
+    h.clock.advance(WINDOW / 2);
+    h.publisher.upstream_message("quote");
 
     // One nanosecond short of the window.
-    h.clock.advance(WINDOW - Duration::from_nanos(1));
+    h.clock.advance(WINDOW / 2 - Duration::from_nanos(1));
     assert!(
         h.publisher.tick().is_none(),
         "the guard fired before its window elapsed"
@@ -147,6 +151,63 @@ fn an_upstream_resuming_after_a_silent_window_restarts_the_idle_guards_window() 
     // A whole window since it resumed, and still nothing published.
     h.publisher.upstream_message("snapshot");
     assert_eq!(h.publisher.tick(), Some(Exit::IdleGuard));
+}
+
+#[test]
+fn a_message_exactly_one_window_after_the_last_is_a_resume() {
+    // `check` reads the upstream as silent once a whole window has passed
+    // since its last message, so the message that ends that silence resumes
+    // the window, at the boundary too.
+    let mut h = guarded();
+    h.publisher.upstream_message("quote");
+    h.clock.advance(WINDOW);
+    h.publisher.upstream_message("quote");
+    assert!(
+        h.publisher.tick().is_none(),
+        "the message that ended a whole window of silence fired the guard"
+    );
+}
+
+#[test]
+fn a_publication_after_a_resume_restarts_the_idle_guards_window() {
+    // The window is counted from the later of the resume and the last
+    // publication. An adapter that publishes halfway through the window after
+    // a resume, and keeps receiving, has published inside the window that
+    // ends one window after the resume, so it is not idle then.
+    let mut h = guarded();
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = adapter.handles()[0];
+    h.publisher.upstream_message("quote");
+    h.publisher.arrive(harness::quote(instrument, 1));
+    h.clock.advance(Duration::from_secs(2 * 3600));
+    assert!(h.publisher.tick().is_none(), "the break is quiet");
+
+    // Resumed, published at half the window, and delivering every second.
+    let half = WINDOW.as_secs() / 2;
+    for second in 0..=WINDOW.as_secs() {
+        h.publisher.upstream_message("snapshot");
+        if second == half {
+            h.publisher.arrive(harness::quote(instrument, 2));
+        }
+        assert!(
+            h.publisher.tick().is_none(),
+            "fired {second}s after the resume, {}s after a publication",
+            second.saturating_sub(half)
+        );
+        h.clock.advance(Duration::from_secs(1));
+    }
+    // A whole window after the publication, still delivering: idle.
+    let mut fired = None;
+    for second in WINDOW.as_secs() + 1..=WINDOW.as_secs() + half + 1 {
+        h.publisher.upstream_message("snapshot");
+        if let Some(exit) = h.publisher.tick() {
+            fired = Some((second, exit));
+            break;
+        }
+        h.clock.advance(Duration::from_secs(1));
+    }
+    assert_eq!(fired, Some((half + WINDOW.as_secs(), Exit::IdleGuard)));
 }
 
 #[test]
