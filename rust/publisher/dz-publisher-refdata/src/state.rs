@@ -48,7 +48,7 @@ const SYMBOL_IS_KEY: &str = "-";
 /// The longest venue key, in bytes. Four times the wire field, and refused
 /// rather than truncated past it, because a truncated key would merge two
 /// instruments again.
-pub const MAX_VENUE_KEY_LEN: usize = 256;
+pub(crate) const MAX_VENUE_KEY_LEN: usize = 256;
 
 /// The fewest bytes of padding that prove a `Symbol` was not cut.
 ///
@@ -214,13 +214,13 @@ const fn layout_version(allocation: IdAllocation, keyed: bool) -> u32 {
 /// would have the same `Symbol` as the key without it, and a record line
 /// saying "the key is the `Symbol`" could not say which was meant.
 #[must_use]
-pub fn is_venue_key(key: &[u8]) -> bool {
+pub(crate) fn is_venue_key(key: &[u8]) -> bool {
     (1..=MAX_VENUE_KEY_LEN).contains(&key.len()) && !key.contains(&0)
 }
 
 /// A `Symbol` with its trailing NUL padding removed.
 #[must_use]
-pub fn unpadded(symbol: &[u8; SYMBOL_LEN]) -> &[u8] {
+pub(crate) fn unpadded(symbol: &[u8; SYMBOL_LEN]) -> &[u8] {
     let end = symbol
         .iter()
         .rposition(|&byte| byte != 0)
@@ -238,7 +238,7 @@ pub fn unpadded(symbol: &[u8; SYMBOL_LEN]) -> &[u8] {
 /// No cut leaves four bytes of padding. A NUL before the padding is no key at
 /// all, since a key holds none.
 #[must_use]
-pub fn symbol_is_whole(symbol: &[u8; SYMBOL_LEN]) -> bool {
+pub(crate) fn symbol_is_whole(symbol: &[u8; SYMBOL_LEN]) -> bool {
     let kept = unpadded(symbol);
     !kept.is_empty() && SYMBOL_LEN - kept.len() >= WHOLE_SYMBOL_PADDING && !kept.contains(&0)
 }
@@ -256,9 +256,9 @@ pub struct Entry {
     /// mint them two `Instrument ID`s that publish as the same instrument.
     pub symbol: [u8; SYMBOL_LEN],
     /// The venue key, in a keyed record. `None` is a key that is the `Symbol`
-    /// with its padding removed, which version 4 writes as `-` and allows only
-    /// where [`symbol_is_whole`] holds. Always `None` in versions 1 to 3,
-    /// which carry no key.
+    /// with its padding removed, and allowed only where the `Symbol` cannot
+    /// have been cut from a longer name: at least four bytes of padding and no
+    /// NUL before them. Always `None` in versions 1 to 3, which carry no key.
     pub venue_key: Option<Box<[u8]>>,
     /// `None` when the instrument was published at the time this entry was
     /// written. Otherwise the Unix second it was last published, which is what
@@ -296,7 +296,7 @@ impl Entry {
 /// one equal to its `Symbol`, so the record never has to guess whether a
 /// `Symbol` is a whole key or a cut prefix.
 #[must_use]
-pub fn venue_key_field(key: &[u8], symbol: &[u8; SYMBOL_LEN]) -> Option<Box<[u8]>> {
+pub(crate) fn venue_key_field(key: &[u8], symbol: &[u8; SYMBOL_LEN]) -> Option<Box<[u8]>> {
     if symbol_is_whole(symbol) && unpadded(symbol) == key {
         None
     } else {
