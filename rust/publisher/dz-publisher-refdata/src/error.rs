@@ -1,7 +1,42 @@
 //! Why a publisher's reference data will not start.
 
-use crate::state::{IdAllocation, RecordError, VenueKeys};
+use std::fmt;
+
+use dz_edge_refdata::SYMBOL_LEN;
+
+use crate::state::{unpadded, IdAllocation, RecordError, VenueKeys};
 use crate::store::StateError;
+
+/// How many entries a refusal names before it says how many more there are.
+///
+/// Enough to start a seed from, and few enough that a record with every entry
+/// unresolved is still one line.
+pub(crate) const NAMED_ENTRIES: usize = 10;
+
+/// Entries named by `Instrument ID` and `Symbol`, the first
+/// [`NAMED_ENTRIES`] of them, and `+N more` for the rest.
+///
+/// The runtime prints a refusal as it is, so the IDs and `Symbol`s are in the
+/// message rather than only in the variant: they are what the operator needs
+/// to write the seed mapping that resolves them.
+pub(crate) struct NamedEntries<'a>(pub(crate) &'a [(u32, [u8; SYMBOL_LEN])]);
+
+impl fmt::Display for NamedEntries<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, (instrument_id, symbol)) in self.0.iter().take(NAMED_ENTRIES).enumerate() {
+            if index > 0 {
+                f.write_str(", ")?;
+            }
+            let symbol = String::from_utf8_lossy(unpadded(symbol));
+            write!(f, "ID {instrument_id} {symbol:?}")?;
+        }
+        let rest = self.0.len().saturating_sub(NAMED_ENTRIES);
+        if rest > 0 {
+            write!(f, " (+{rest} more)")?;
+        }
+        Ok(())
+    }
+}
 
 /// The startup failures, none of which is recoverable by continuing.
 ///
@@ -160,8 +195,13 @@ pub enum RefdataError {
     /// to whichever key is offered first depends on what one host saw first,
     /// so the record opens only after a mapping resolves them through
     /// [`seed`](crate::seed()). Each entry is named by its ID and `Symbol`.
-    #[error("{} entries of the persisted state have no known venue key; resolve them with a seed mapping", entries.len())]
+    #[error(
+        "{} entries of the persisted state have no known venue key; resolve them with a seed \
+         mapping: {}",
+        entries.len(),
+        NamedEntries(entries)
+    )]
     UnresolvedVenueKeys {
-        entries: Vec<(u32, [u8; dz_edge_refdata::SYMBOL_LEN])>,
+        entries: Vec<(u32, [u8; SYMBOL_LEN])>,
     },
 }

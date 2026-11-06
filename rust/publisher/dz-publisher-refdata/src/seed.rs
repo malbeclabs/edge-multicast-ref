@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use dz_edge_refdata::SYMBOL_LEN;
 
+use crate::error::NamedEntries;
 use crate::state::{
     is_venue_key, symbol_is_whole, unpadded, venue_key_field, Entry, IdAllocation, RecordError,
     StateRecord, VenueKeys, FIRST_INSTRUMENT_ID,
@@ -75,7 +76,12 @@ pub enum SeedError {
 
     /// Entries of an unkeyed record whose key the seed neither maps nor
     /// retires, named by ID and `Symbol`.
-    #[error("{} entries of the record have no known venue key, and the seed neither maps nor retires them", entries.len())]
+    #[error(
+        "{} entries of the record have no known venue key, and the seed neither maps nor \
+         retires them: {}",
+        entries.len(),
+        NamedEntries(entries)
+    )]
     Unresolved {
         entries: Vec<(u32, [u8; SYMBOL_LEN])>,
     },

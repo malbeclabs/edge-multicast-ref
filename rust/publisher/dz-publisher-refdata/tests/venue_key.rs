@@ -573,6 +573,44 @@ fn unresolved(error: &RefdataError) -> Vec<u32> {
 }
 
 #[test]
+fn the_refusal_names_the_unresolved_ids_and_symbols() {
+    // The runtime prints the refusal as it is, and the IDs and Symbols are
+    // what a seed mapping is written from, so they are in the message.
+    let one = ticker("F", 64);
+    let error = Registry::open(
+        keyed(),
+        holding(&unkeyed_record(&["AAA", &one])),
+        ManualClock::new(),
+    )
+    .unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains(&format!("ID 2 \"{one}\"")), "{message}");
+    assert!(
+        !message.contains("AAA"),
+        "a resolved entry is not named: {message}"
+    );
+    assert!(!message.contains("more"), "{message}");
+
+    // Past ten, the rest are counted rather than named.
+    let full: Vec<String> = (0..13).map(|n| ticker(&format!("F{n:02}"), 64)).collect();
+    let symbols: Vec<&str> = full.iter().map(String::as_str).collect();
+    let error = Registry::open(
+        keyed(),
+        holding(&unkeyed_record(&symbols)),
+        ManualClock::new(),
+    )
+    .unwrap_err();
+    let message = error.to_string();
+    assert!(message.starts_with("13 entries"), "{message}");
+    assert!(
+        message.contains(&format!("ID 10 \"{}\"", full[9])),
+        "{message}"
+    );
+    assert!(!message.contains("ID 11 "), "{message}");
+    assert!(message.ends_with(" (+3 more)"), "{message}");
+}
+
+#[test]
 fn an_unkeyed_record_with_a_full_width_entry_is_refused_at_open() {
     let full = ticker("F", 64);
     let bytes = unkeyed_record(&["AAA", &full]);

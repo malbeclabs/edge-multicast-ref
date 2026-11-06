@@ -285,6 +285,10 @@ fn stated_keys_open_an_unkeyed_record_once_every_entry_is_mapped() {
         matches!(&partial, SeedError::Unresolved { entries } if entries.len() == 1 && entries[0].0 == 2),
         "{partial}"
     );
+    assert!(
+        partial.to_string().ends_with(": ID 2 \"BBB\""),
+        "the message names the entry a mapping is missing for: {partial}"
+    );
 
     seed(
         store.clone(),
