@@ -145,9 +145,10 @@ reaches `on_payload` here, because every payload is `Received::Payload` and
 nothing in this transport classifies. An adapter counting those heartbeats as
 upstream messages therefore tells the guard the upstream is delivering while
 the feed publishes nothing, and the process exits on a healthy quiet session.
-**A multicast adapter must not call `upstream_message` for a heartbeat**, and
-`[[feed]] idle_guard` must clear the longest quiet period the venue's calendar
-allows.
+**A multicast adapter must not call `upstream_message` for a heartbeat.** The
+window does not have to outlast the venue's calendar breaks: the guard counts
+publish silence from when a silent upstream resumed, and reads the upstream as
+delivering only for a message a whole window after that (`IdleGuard`'s rustdoc).
 
 **`QueuedInput` backpressure becomes kernel loss here.** Under the threaded
 input model a full queue makes the connection wait: the events a payload
