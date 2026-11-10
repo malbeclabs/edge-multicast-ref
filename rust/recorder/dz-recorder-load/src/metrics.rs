@@ -49,6 +49,7 @@ use prometheus::{IntCounter, IntCounterVec, IntGauge, Opts, Registry, TextEncode
 
 use dz_recorder_rows::Grain;
 
+use crate::conformance::ConformanceRefusal;
 use crate::market_data::RefusalKind;
 
 /// What went wrong, as a bounded label.
@@ -178,6 +179,11 @@ pub struct LoaderMetrics {
     market_data_unloaded_objects: IntGauge,
     market_data_oldest_unloaded_age_seconds: IntGauge,
     market_data_refused_total: IntCounterVec,
+    conformance_unjudged_objects: IntGauge,
+    conformance_oldest_unjudged_age_seconds: IntGauge,
+    conformance_objects_judged_total: IntCounter,
+    conformance_refused_total: IntCounterVec,
+    conformance_unplaced_total: IntCounterVec,
 }
 
 impl LoaderMetrics {
@@ -360,6 +366,50 @@ impl LoaderMetrics {
                 &labels,
                 &["reason"],
             ),
+            conformance_unjudged_objects: gauge(
+                &registry,
+                "dz_loader_conformance_unjudged_objects",
+                "Objects of a feed named in [[conformance]] that no rule set version has \
+                 judged yet, including those whose findings the sink is still holding. Zero on \
+                 a host where no feed is judged.",
+                &labels,
+            ),
+            conformance_oldest_unjudged_age_seconds: gauge(
+                &registry,
+                "dz_loader_conformance_oldest_unjudged_age_seconds",
+                "How old the oldest of those is, from its own receive window. The runner's own \
+                 lag, and not the load's or the market data derivation's: an object evicted \
+                 before it was judged has no verdict, ever. Alert on this against the \
+                 recorder's eviction window.",
+                &labels,
+            ),
+            conformance_objects_judged_total: counter(
+                &registry,
+                "dz_loader_conformance_objects_judged_total",
+                "Objects whose findings have landed and whose judgement is in the conformance \
+                 ledger.",
+                &labels,
+            ),
+            conformance_refused_total: counter_vec(
+                &registry,
+                "dz_loader_conformance_refused_total",
+                "What the runner declined to write, by cause. tool_could_not_run, \
+                 version_unresolvable and version_disagrees leave objects unjudged and write \
+                 nothing — never a table of unverifiable. no_instance and \
+                 undescribed_instance are verdicts the rule set stated that could not be placed \
+                 on a channel instance, counted rather than filed under a guess.",
+                &labels,
+                &["reason"],
+            ),
+            conformance_unplaced_total: counter_vec(
+                &registry,
+                "dz_loader_conformance_unplaced_total",
+                "Verdicts the rule set placed on no channel instance, by rule — the volume of \
+                 what conformance_finding does not yet hold. rule_id is the rule set's own, \
+                 carried through opaquely.",
+                &labels,
+                &["rule_id"],
+            ),
             // Last, so every borrow above has been released by the time the
             // registry itself is moved into the struct.
             registry,
@@ -382,6 +432,11 @@ impl LoaderMetrics {
         for reason in RefusalKind::ALL {
             metrics
                 .market_data_refused_total
+                .with_label_values(&[reason.as_str()]);
+        }
+        for reason in ConformanceRefusal::ALL {
+            metrics
+                .conformance_refused_total
                 .with_label_values(&[reason.as_str()]);
         }
         metrics
@@ -476,6 +531,30 @@ impl LoaderMetrics {
         }
     }
 
+    /// The conformance runner's lag, published beside the load's and never as
+    /// it.
+    pub fn conformance_pass_finished(&self, unjudged: i64, oldest_unjudged_age_seconds: i64) {
+        self.conformance_unjudged_objects.set(unjudged);
+        self.conformance_oldest_unjudged_age_seconds
+            .set(oldest_unjudged_age_seconds);
+    }
+
+    pub fn conformance_judged(&self) {
+        self.conformance_objects_judged_total.inc();
+    }
+
+    pub fn conformance_refused(&self, reason: ConformanceRefusal, count: u64) {
+        self.conformance_refused_total
+            .with_label_values(&[reason.as_str()])
+            .inc_by(count);
+    }
+
+    pub fn conformance_unplaced(&self, rule_id: &str, count: u64) {
+        self.conformance_unplaced_total
+            .with_label_values(&[rule_id])
+            .inc_by(count);
+    }
+
     /// The exposition text `GET /metrics` serves.
     #[must_use]
     pub fn render(&self) -> String {
@@ -556,6 +635,10 @@ mod tests {
             "dz_loader_market_data_unloaded_objects",
             "dz_loader_market_data_oldest_unloaded_age_seconds",
             "dz_loader_market_data_refused_total",
+            "dz_loader_conformance_unjudged_objects",
+            "dz_loader_conformance_oldest_unjudged_age_seconds",
+            "dz_loader_conformance_objects_judged_total",
+            "dz_loader_conformance_refused_total",
         ] {
             assert!(text.contains(family), "{family} is absent from:\n{text}");
         }

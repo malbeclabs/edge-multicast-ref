@@ -1021,7 +1021,7 @@ fn take_turns(derivable: Vec<(usize, String)>) -> Vec<usize> {
 
 /// A manifest, with one that is no longer there as `None`: the shape an
 /// eviction takes between the walk and the scan, or the scan and the load.
-fn read_manifest_if_present(path: &Path) -> Result<Option<SegmentManifest>, String> {
+pub(crate) fn read_manifest_if_present(path: &Path) -> Result<Option<SegmentManifest>, String> {
     match std::fs::read_to_string(path) {
         Ok(text) => serde_json::from_str(&text)
             .map(Some)
@@ -1073,12 +1073,12 @@ fn age_seconds(end_ns: u64, now_unix_seconds: i64) -> i64 {
 /// Zero for empty is what makes "nothing is waiting" and "the oldest thing
 /// waiting ended a moment ago" the same reading, which is the reading a lag
 /// alert wants: both are a loader that is not behind.
-fn oldest_age(ends: impl Iterator<Item = u64>, now_unix_seconds: i64) -> i64 {
+pub(crate) fn oldest_age(ends: impl Iterator<Item = u64>, now_unix_seconds: i64) -> i64 {
     ends.min()
         .map_or(0, |end_ns| age_seconds(end_ns, now_unix_seconds))
 }
 
-fn now_unix_seconds() -> i64 {
+pub(crate) fn now_unix_seconds() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)

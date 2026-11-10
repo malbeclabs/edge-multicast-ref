@@ -101,6 +101,48 @@ pub fn record_into(
     }
 }
 
+/// `segments` objects from one writer, each holding `publisher`'s stream. One
+/// writer and not several: an object is named for its receive window and its
+/// place in the run, and two writers fed the same stream would name two
+/// objects alike.
+pub fn record_segments(
+    root: &Path,
+    completed: &Path,
+    publisher: &SyntheticPublisher,
+    segments: u64,
+) {
+    let cfg = ArchiveWriterConfig {
+        staging_dir: root.join("staging"),
+        completed_dir: completed.to_path_buf(),
+        rotate_bytes: 1 << 30,
+        rotate_interval: Duration::from_secs(3600),
+        staging_max: 1 << 40,
+        compression: Compression::Zstd { level: 1 },
+        identity: identity(),
+        feed: FEED.to_owned(),
+        roles_joined: vec![
+            RoleJoin::on(PortRole::Mktdata, GROUP, port_for(PortRole::Mktdata)),
+            RoleJoin::on(PortRole::Snapshot, GROUP, port_for(PortRole::Snapshot)),
+        ],
+        link_headers: LinkHeaders::Synthesised,
+        capture_drop_scope: CaptureDropScope::PortRole,
+    };
+    let mut writer = ArchiveWriter::new(cfg, 0).expect("the archive opens");
+    for segment in 0..segments {
+        publisher
+            .publish_into(&mut writer)
+            .expect("the write path never fails the caller");
+        writer
+            .rotate_at(1_000_000_000 * (segment + 1))
+            .expect("rotation")
+            .expect("a segment that held datagrams produces an object");
+        writer
+            .wait_completed()
+            .expect("the compressor publishes exactly one object")
+            .expect("publication");
+    }
+}
+
 /// The same, into a directory of its own.
 pub fn record(publisher: &SyntheticPublisher) -> (tempfile::TempDir, Recorded) {
     let dir = tempfile::tempdir().expect("a temporary directory");

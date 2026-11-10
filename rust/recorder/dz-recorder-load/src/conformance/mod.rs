@@ -23,5 +23,45 @@ pub mod findings;
 pub mod judge;
 pub mod ledger;
 pub mod rows;
+pub mod stage;
 #[cfg(test)]
 pub(crate) mod testing;
+
+/// What the runner declined to write, by cause. Every one is counted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConformanceRefusal {
+    /// The rule set could not run over an object: exit 2, no binary, a report
+    /// it did not write or one this runner cannot read. The object stays
+    /// unjudged.
+    ToolCouldNotRun,
+    /// The tool could not say which rule set it is. Nothing is judged.
+    VersionUnresolvable,
+    /// The tool answered with a version other than the configured one.
+    /// Nothing is judged.
+    VersionDisagrees,
+    /// A stated verdict that named no channel instance.
+    NoInstance,
+    /// A stated verdict naming an instance the manifest does not describe.
+    UndescribedInstance,
+}
+
+impl ConformanceRefusal {
+    pub const ALL: [Self; 5] = [
+        Self::ToolCouldNotRun,
+        Self::VersionUnresolvable,
+        Self::VersionDisagrees,
+        Self::NoInstance,
+        Self::UndescribedInstance,
+    ];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ToolCouldNotRun => "tool_could_not_run",
+            Self::VersionUnresolvable => "version_unresolvable",
+            Self::VersionDisagrees => "version_disagrees",
+            Self::NoInstance => "no_instance",
+            Self::UndescribedInstance => "undescribed_instance",
+        }
+    }
+}
