@@ -82,14 +82,15 @@ fn row(stamp: &RunStamp<'_>, group: &[&Placed<'_>]) -> ConformanceFinding {
     let first = winners[0];
 
     // The span of the winning verdict's evidence, in the era of the first
-    // range that cites one. A span across a reset would compare two rulers.
+    // range that cites one — its reset count, and its era ordinal where the
+    // report states one. A span across a reset would compare two rulers.
     let era = winners
         .iter()
-        .find_map(|p| p.entry.evidence.map(|e| e.reset_count));
+        .find_map(|p| p.entry.evidence.map(|e| (e.reset_count, e.era_index)));
     let ranges: Vec<(u64, u64)> = winners
         .iter()
         .filter_map(|p| p.entry.evidence)
-        .filter(|e| Some(e.reset_count) == era)
+        .filter(|e| Some((e.reset_count, e.era_index)) == era)
         .map(|e| (e.first_seq, e.last_seq))
         .collect();
     let (first_seq, last_seq) = if first.subject == Subject::Channel {
@@ -98,8 +99,8 @@ fn row(stamp: &RunStamp<'_>, group: &[&Placed<'_>]) -> ConformanceFinding {
         // that held datagrams, rather than one path's numbers presented as the
         // channel's.
         (0, 0)
-    } else if let (true, Some(coverage)) = (ranges.is_empty(), first.coverage) {
-        (coverage.first_seq, coverage.last_seq)
+    } else if ranges.is_empty() {
+        first.coverage.map_or((0, 0), coverage_span)
     } else {
         (
             ranges.iter().map(|r| r.0).min().unwrap_or(0),
@@ -108,16 +109,21 @@ fn row(stamp: &RunStamp<'_>, group: &[&Placed<'_>]) -> ConformanceFinding {
     };
 
     let detail = if winners.len() > 1 {
-        with_note(
-            &first.detail,
-            &format!(
-                "{} stated over {} entries; first_seq and last_seq span the {} in era {}",
-                verdict_name(first.verdict),
-                winners.len(),
-                if ranges.len() == 1 { "range" } else { "ranges" },
-                era.map_or_else(|| "none".to_owned(), |e| e.to_string()),
+        let reduced = format!(
+            "{} stated over {} entries",
+            verdict_name(first.verdict),
+            winners.len()
+        );
+        // The span is named only when it is one: a fallback to the instance's
+        // coverage cites no range, and saying it spans one would be untrue.
+        let note = match (ranges.len(), era) {
+            (0, _) | (_, None) => reduced,
+            (n, Some((reset_count, _))) => format!(
+                "{reduced}; first_seq and last_seq span the {} at reset count {reset_count}",
+                if n == 1 { "range" } else { "ranges" },
             ),
-        )
+        };
+        with_note(&first.detail, &note)
     } else {
         first.detail.clone()
     };
@@ -144,6 +150,20 @@ fn row(stamp: &RunStamp<'_>, group: &[&Placed<'_>]) -> ConformanceFinding {
         derivation: Derivation::Archive,
         first_seq,
         last_seq,
+    }
+}
+
+/// The instance's coverage, as a span the row may state.
+///
+/// The manifest's `first_seq` and `last_seq` are the first and last numbers to
+/// arrive, across every era in the object. Where the instance reset inside the
+/// object they are two rulers — 900 before the reset and 50 after it — and no
+/// span between them means anything, so the row states 0/0 rather than one.
+fn coverage_span(coverage: &dz_recorder_archive::InstanceCoverage) -> (u64, u64) {
+    if coverage.reset_counts_seen.len() > 1 {
+        (0, 0)
+    } else {
+        (coverage.first_seq, coverage.last_seq)
     }
 }
 
@@ -291,6 +311,44 @@ mod tests {
         assert_eq!(channel.verdict, FindingVerdict::Violation);
         assert_eq!((channel.first_seq, channel.last_seq), (0, 0));
         assert_eq!(channel.dst_port, MKTDATA);
+    }
+
+    /// An instance that sent 900 to 1000, reset, and sent 1 to 50 has a
+    /// coverage of 900 and 50 in arrival order: two rulers. A row that cites
+    /// no range states 0/0 for it, not a span from one era into the next.
+    #[test]
+    fn a_coverage_that_spans_a_reset_is_not_stated_as_a_span() {
+        let mut across = coverage(900, 1_000);
+        across.last_seq = 50;
+        across.count = 151;
+        across.reset_counts_seen = vec![0, 1];
+        let m = manifest(
+            vec![joined(PortRole::Mktdata, GROUP, MKTDATA)],
+            &[(MKTDATA, across)],
+        );
+        let mut e = entry("TEST.A", Outcome::Pass, Some(MKTDATA));
+        e.evidence = None;
+        let r = report(vec![e.clone(), e]);
+        let (placed, _) = place(&m, GROUP, &r, &Holes::default(), &carried(&m));
+        let rows = finding_rows(
+            &RunStamp {
+                manifest: &m,
+                rule_set_version: "v1+abc",
+                run_ts: 42,
+            },
+            &placed,
+        );
+        assert_eq!((rows[0].first_seq, rows[0].last_seq), (0, 0));
+        assert!(
+            !rows[0].detail.contains("span"),
+            "no range was cited, so none is said to be spanned: {}",
+            rows[0].detail
+        );
+        assert!(
+            rows[0].detail.contains("pass stated over 2 entries"),
+            "{}",
+            rows[0].detail
+        );
     }
 
     /// Where the winning verdict cites no range, the instance's coverage

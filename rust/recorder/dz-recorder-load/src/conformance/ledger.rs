@@ -38,6 +38,11 @@ pub struct JudgeEntry {
     /// The manifest's feed, so compaction can keep to the feeds a pass judged.
     pub feed: String,
     pub judged_at_ns: u64,
+    /// Set when the runner gave up on the object rather than judging it: the
+    /// reason, after the attempts it took. The object is skipped like a judged
+    /// one, and no finding vouches for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused: Option<String>,
 }
 
 #[derive(Debug)]
@@ -242,6 +247,7 @@ mod tests {
             rule_set_version: version.to_owned(),
             feed: "top-of-book".to_owned(),
             judged_at_ns: 1,
+            refused: None,
         }
     }
 

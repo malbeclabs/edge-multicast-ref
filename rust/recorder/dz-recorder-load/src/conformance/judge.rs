@@ -9,6 +9,7 @@
 //! us, and it would move the panel that measures how often the archive opens
 //! the gate every time a binary went missing.
 
+use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 
@@ -23,7 +24,7 @@ use dz_recorder_rows::derive::verify_digest;
 use dz_recorder_rows::{DeriveError, RowBatch};
 use thiserror::Error;
 
-use super::findings::{place, role_named, Carried, HoleFinder, Refused};
+use super::findings::{place, role_named, Carried, HoleFinder, Holes, Refused};
 use super::rows::{finding_rows, RunStamp};
 
 #[derive(Debug, Error)]
@@ -93,10 +94,25 @@ pub enum JudgeError {
 }
 
 impl JudgeError {
-    /// Whether this is the rule set failing to run, as opposed to the object.
+    /// Whether the rule set failed over this object: it exited 2, died on a
+    /// signal, or wrote a report this runner cannot read. One capture can do
+    /// that to a binary that judges every other object.
     #[must_use]
     pub const fn is_tool(&self) -> bool {
         matches!(self, Self::Tool { .. })
+    }
+
+    /// Whether the binary could not be started at all — nothing about any
+    /// object, and the same for every object of the feed.
+    #[must_use]
+    pub const fn tool_cannot_start(&self) -> bool {
+        matches!(
+            self,
+            Self::Tool {
+                cause: ToolError::NotStarted { .. },
+                ..
+            }
+        )
     }
 }
 
@@ -140,45 +156,12 @@ pub fn judge_object<R: RuleSet>(input: &JudgeInput<'_, R>) -> Result<Judged, Jud
 
     // 2. Replayed to its end, under one section's claims, with its own holes
     //    and what arrived in each group found in the same walk.
-    let mut archive = ArchiveSource::open(input.object).map_err(|cause| JudgeError::Open {
-        path: input.object.to_path_buf(),
-        cause,
-    })?;
-    let provenance = SectionProvenance::of(&archive).map_err(|cause| JudgeError::Section {
-        object_key: key(),
-        cause,
-    })?;
-    let scope = provenance.capture_drop_scope;
-    if manifest.capture_drop_scope != scope.as_str() {
-        return Err(JudgeError::ScopeDisagreement {
-            object_key: key(),
-            section: scope.as_str().to_owned(),
-            manifest: manifest.capture_drop_scope.clone(),
-        });
-    }
-    let mut holes = HoleFinder::new(scope);
-    let mut carried = Carried::default();
-    let mut datagrams: Vec<OwnedDatagram> = Vec::new();
-    while let Some(dg) = archive.next() {
-        // After every datagram and not only at the end: the reader takes up a
-        // later section's claims as it reaches it, and an archive whose
-        // sections went A, B, A would end looking like one section while B's
-        // datagrams were re-written under A's claims.
-        if SectionProvenance::of(&archive).ok().as_ref() != Some(&provenance) {
-            return Err(JudgeError::SectionChanged { object_key: key() });
-        }
-        let recorded = dg.as_recorded();
-        holes.observe(&recorded);
-        carried.observe(&recorded);
-        datagrams.push(dg);
-    }
-    if archive.terminated_by() != Termination::Eof {
-        return Err(JudgeError::Incomplete {
-            object_key: key(),
-            termination: format!("{:?}", archive.terminated_by()),
-        });
-    }
-    let holes = holes.finish();
+    let Replayed {
+        datagrams,
+        provenance,
+        holes,
+        carried,
+    } = replay(input.object, manifest)?;
 
     // 3. One file per group, in a directory of this object's own.
     let dir = tempfile::Builder::new()
@@ -228,8 +211,10 @@ pub fn judge_object<R: RuleSet>(input: &JudgeInput<'_, R>) -> Result<Judged, Jud
     };
     let mut refused = Refused::default();
     let mut placed = Vec::new();
+    let none = Holes::default();
     for (group, report) in &reports {
-        let (p, r) = place(manifest, *group, report, &holes, &carried);
+        let group_holes = holes.get(group).unwrap_or(&none);
+        let (p, r) = place(manifest, *group, report, group_holes, &carried);
         refused.add(&r);
         placed.extend(p);
     }
@@ -243,6 +228,74 @@ pub fn judge_object<R: RuleSet>(input: &JudgeInput<'_, R>) -> Result<Judged, Jud
         },
         refused,
         invocations: reports.len() as u64,
+    })
+}
+
+/// An object read back, with what the walk found.
+pub(crate) struct Replayed {
+    pub datagrams: Vec<OwnedDatagram>,
+    pub provenance: SectionProvenance,
+    /// Each group's own holes. One loss derivation per group, because the rule
+    /// set reads one group's datagrams at a time and an instance is keyed with
+    /// no group: a sequence number lost in one group and delivered in the other
+    /// is a hole in the first group's file, and one derivation over both would
+    /// see it delivered.
+    pub holes: BTreeMap<Ipv4Addr, Holes>,
+    pub carried: Carried,
+}
+
+/// Replays an object to its end under one section's claims.
+pub(crate) fn replay(object: &Path, manifest: &SegmentManifest) -> Result<Replayed, JudgeError> {
+    let key = || manifest.object_key.clone();
+    let mut archive = ArchiveSource::open(object).map_err(|cause| JudgeError::Open {
+        path: object.to_path_buf(),
+        cause,
+    })?;
+    let provenance = SectionProvenance::of(&archive).map_err(|cause| JudgeError::Section {
+        object_key: key(),
+        cause,
+    })?;
+    let scope = provenance.capture_drop_scope;
+    if manifest.capture_drop_scope != scope.as_str() {
+        return Err(JudgeError::ScopeDisagreement {
+            object_key: key(),
+            section: scope.as_str().to_owned(),
+            manifest: manifest.capture_drop_scope.clone(),
+        });
+    }
+    let mut finders: BTreeMap<Ipv4Addr, HoleFinder> = BTreeMap::new();
+    let mut carried = Carried::default();
+    let mut datagrams: Vec<OwnedDatagram> = Vec::new();
+    while let Some(dg) = archive.next() {
+        // After every datagram and not only at the end: the reader takes up a
+        // later section's claims as it reaches it, and an archive whose
+        // sections went A, B, A would end looking like one section while B's
+        // datagrams were re-written under A's claims.
+        if SectionProvenance::of(&archive).ok().as_ref() != Some(&provenance) {
+            return Err(JudgeError::SectionChanged { object_key: key() });
+        }
+        let recorded = dg.as_recorded();
+        finders
+            .entry(*dg.dst.ip())
+            .or_insert_with(|| HoleFinder::new(scope))
+            .observe(&recorded);
+        carried.observe(&recorded);
+        datagrams.push(dg);
+    }
+    if archive.terminated_by() != Termination::Eof {
+        return Err(JudgeError::Incomplete {
+            object_key: key(),
+            termination: format!("{:?}", archive.terminated_by()),
+        });
+    }
+    Ok(Replayed {
+        datagrams,
+        provenance,
+        holes: finders
+            .into_iter()
+            .map(|(group, finder)| (group, finder.finish()))
+            .collect(),
+        carried,
     })
 }
 
@@ -284,6 +337,11 @@ pub(crate) mod tests {
         pub runs: std::rc::Rc<RefCell<Vec<(Ipv4Addr, PortRoles)>>>,
         /// A group's own report, in place of `rules`, where one is stated.
         pub per_group: std::collections::BTreeMap<Ipv4Addr, Vec<RuleOutcome>>,
+        /// Runs, counted from 0 across every clone, that fail as the tool
+        /// does on a capture it cannot judge (exit 2).
+        pub fail_runs: std::collections::BTreeSet<usize>,
+        /// Fails every run as a binary that cannot be started.
+        pub not_started: bool,
     }
 
     impl StubRuleSet {
@@ -294,6 +352,8 @@ pub(crate) mod tests {
                 broken: false,
                 runs: std::rc::Rc::default(),
                 per_group: std::collections::BTreeMap::new(),
+                fail_runs: std::collections::BTreeSet::new(),
+                not_started: false,
             }
         }
     }
@@ -304,10 +364,17 @@ pub(crate) mod tests {
                 invocation.capture.is_file(),
                 "the segment is on disk while judged"
             );
+            let run = self.runs.borrow().len();
             self.runs
                 .borrow_mut()
                 .push((invocation.group, invocation.ports));
-            if self.broken {
+            if self.not_started {
+                return Err(ToolError::NotStarted {
+                    tool: self.describe(),
+                    detail: "no such file".to_owned(),
+                });
+            }
+            if self.broken || self.fail_runs.contains(&run) {
                 return Err(ToolError::CouldNotRun {
                     tool: self.describe(),
                     stderr: "no such rule set".to_owned(),
@@ -582,6 +649,63 @@ pub(crate) mod tests {
         assert_eq!(rows.len(), 1, "{rows:#?}");
         assert_eq!(rows[0].verdict, FindingVerdict::Violation);
         assert_eq!((rows[0].first_seq, rows[0].last_seq), (4, 5));
+    }
+
+    /// One instance in two groups, and sequence number 5 lost in one of them.
+    /// The rule set read each group's file on its own, so the group that lost
+    /// it has a hole there and the other does not: one derivation over both
+    /// would see 5 delivered and leave the lossy group's violation standing.
+    #[test]
+    fn each_group_has_its_own_holes() {
+        use crate::conformance::findings::place;
+        use dz_recorder_archive::writer::RoleJoin;
+        use dz_recorder_replay::synthetic::GROUP;
+        const LOSSY: Ipv4Addr = Ipv4Addr::new(233, 252, 0, 11);
+        let port = port_for(PortRole::Mktdata);
+        let mut datagrams = SyntheticPublisher::clean(20).datagrams();
+        let copies: Vec<_> = datagrams
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != 5)
+            .map(|(_, dg)| {
+                let mut dg = dg.clone();
+                dg.dst = std::net::SocketAddrV4::new(LOSSY, port);
+                dg.recv_ts_ns += 1;
+                dg
+            })
+            .collect();
+        datagrams.extend(copies);
+        datagrams.sort_by_key(|dg| dg.recv_ts_ns);
+        let (_dir, recorded) = crate::conformance::testing::record_datagrams(
+            &datagrams,
+            vec![
+                RoleJoin::on(PortRole::Mktdata, GROUP, port),
+                RoleJoin::on(PortRole::Mktdata, LOSSY, port),
+            ],
+        );
+        let replayed = replay(&recorded.object, &recorded.manifest).expect("replayed");
+        let report = RuleSetReport {
+            report_format: REPORT_FORMAT,
+            feed: "tob".to_owned(),
+            rules: vec![on_mktdata("TEST.ONE", Outcome::Violation, 5, 5)],
+            unplaced_findings: 0,
+        };
+        let verdict = |group| {
+            let (placed, _) = place(
+                &recorded.manifest,
+                group,
+                &report,
+                &replayed.holes[&group],
+                &replayed.carried,
+            );
+            placed[0].verdict
+        };
+        assert_eq!(verdict(GROUP), FindingVerdict::Violation, "delivered here");
+        assert_eq!(
+            verdict(LOSSY),
+            FindingVerdict::Unverifiable,
+            "lost here, and the rule set read this group's file without it"
+        );
     }
 
     /// An archive whose sections go A, B, A ends looking like A. Checked only

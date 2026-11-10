@@ -318,6 +318,9 @@ struct Conformance<S> {
     /// and one sink shared with the load would report each one to both.
     sink: S,
     held: Vec<HeldJudgement>,
+    /// Failed attempts per object, so one that keeps failing is given up on
+    /// rather than retried first in its feed on every pass.
+    failures: std::collections::HashMap<dz_recorder_rows::ObjectId, u32>,
 }
 
 fn conformance_of<S>(
@@ -374,6 +377,7 @@ fn conformance_of<S>(
         ledger,
         sink: sink()?,
         held: Vec::new(),
+        failures: std::collections::HashMap::new(),
     }))
 }
 
@@ -463,6 +467,7 @@ fn drive<S: RowSink, C: RowSink>(
                 sink: &mut c.sink,
                 metrics,
                 held: &mut c.held,
+                failures: &mut c.failures,
             }
             .run_once(&stopping);
             for message in &errors {

@@ -31,9 +31,7 @@ pub(crate) mod testing;
 /// What the runner declined to write, by cause. Every one is counted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConformanceRefusal {
-    /// The rule set could not run over an object: exit 2, no binary, a report
-    /// it did not write or one this runner cannot read. The object stays
-    /// unjudged.
+    /// The binary could not be started. The feed waits for the next pass.
     ToolCouldNotRun,
     /// The tool could not say which rule set it is. Nothing is judged.
     VersionUnresolvable,
@@ -50,10 +48,16 @@ pub enum ConformanceRefusal {
     /// A verdict about a path the rule set stopped tracking at its address
     /// cap, so it cannot be placed on one.
     Overflow,
+    /// The rule set failed on one object — exit 2, a signal, a report it did
+    /// not write or that cannot be read — while it may judge the next.
+    ToolFailedOnObject,
+    /// An object that failed every attempt it was given, recorded as refused
+    /// so it stops holding back the objects behind it.
+    GivenUp,
 }
 
 impl ConformanceRefusal {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 9] = [
         Self::ToolCouldNotRun,
         Self::VersionUnresolvable,
         Self::VersionDisagrees,
@@ -61,6 +65,8 @@ impl ConformanceRefusal {
         Self::UndescribedInstance,
         Self::ChannelUnresolved,
         Self::Overflow,
+        Self::ToolFailedOnObject,
+        Self::GivenUp,
     ];
 
     #[must_use]
@@ -73,6 +79,8 @@ impl ConformanceRefusal {
             Self::UndescribedInstance => "undescribed_instance",
             Self::ChannelUnresolved => "channel_unresolved",
             Self::Overflow => "overflow",
+            Self::ToolFailedOnObject => "tool_failed_on_object",
+            Self::GivenUp => "given_up",
         }
     }
 }

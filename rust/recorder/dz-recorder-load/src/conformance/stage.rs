@@ -74,7 +74,17 @@ pub struct Judge<'a, S: RowSink, R: RuleSet + Clone> {
     pub sink: &'a mut S,
     pub metrics: &'a LoaderMetrics,
     pub held: &'a mut Vec<HeldJudgement>,
+    /// Failed attempts per object, carried across passes. In memory: a
+    /// restart gives every object its attempts again, which costs at most
+    /// [`GIVE_UP_AFTER`] more runs of each.
+    pub failures: &'a mut std::collections::HashMap<ObjectId, u32>,
 }
+
+/// Attempts an object gets before the runner gives up on it and records it
+/// as refused. Without a bound, an object that makes the rule set fail sorts
+/// first in its feed on every pass and holds every object behind it back until
+/// it is evicted.
+pub const GIVE_UP_AFTER: u32 = 3;
 
 struct Candidate {
     object: PathBuf,
@@ -187,7 +197,11 @@ impl<S: RowSink, R: RuleSet + Clone> Judge<'_, S, R> {
                 .map(|(i, w)| (i, self.feeds[w.feed_index].feed.clone()))
                 .collect(),
         );
+        // A feed stops for the pass when its binary cannot start, or when two
+        // objects in a row make it fail: one failure is the object's, two in
+        // a row is more likely the tool's.
         let mut tool_failed = vec![false; self.feeds.len()];
+        let mut last_failed_on_object = vec![false; self.feeds.len()];
         let mut attempted = 0usize;
         for index in order {
             if stop() {
@@ -219,20 +233,39 @@ impl<S: RowSink, R: RuleSet + Clone> Judge<'_, S, R> {
                 Ok(judged) => judged,
                 Err(e) => {
                     pass.failed += 1;
-                    if e.is_tool() {
-                        // The binary, not the object: every later object of
-                        // this feed would fail the same way, so the feed waits
-                        // for the next pass.
+                    errors.push(format!("conformance {}: {e}", judged_feed.feed));
+                    if e.tool_cannot_start() {
+                        // The binary, not the object: every object of this
+                        // feed would fail the same way, so the feed waits for
+                        // the next pass and no object is charged with it.
                         self.metrics
                             .conformance_refused(ConformanceRefusal::ToolCouldNotRun, 1);
                         tool_failed[w.feed_index] = true;
+                        continue;
+                    }
+                    if e.is_tool() {
+                        self.metrics
+                            .conformance_refused(ConformanceRefusal::ToolFailedOnObject, 1);
+                        if last_failed_on_object[w.feed_index] {
+                            tool_failed[w.feed_index] = true;
+                        }
+                        last_failed_on_object[w.feed_index] = true;
                     } else {
                         self.metrics.error(ErrorKind::Replay, now_unix_seconds());
                     }
-                    errors.push(format!("conformance {}: {e}", judged_feed.feed));
+                    self.charge(
+                        w,
+                        judged_feed,
+                        pinned.version(),
+                        &e.to_string(),
+                        &mut pass,
+                        &mut errors,
+                    );
                     continue;
                 }
             };
+            last_failed_on_object[w.feed_index] = false;
+            self.failures.remove(&w.id);
             self.count_refusals(&judged.refused);
 
             match self.sink.write_batch(judged.batch, now_unix_nanos()) {
@@ -299,6 +332,52 @@ impl<S: RowSink, R: RuleSet + Clone> Judge<'_, S, R> {
         self.metrics
             .conformance_pass_finished(pass.unjudged as i64, pass.oldest_unjudged_age_seconds);
         (pass, errors)
+    }
+
+    /// Counts one failed attempt against an object, and gives up on it once it
+    /// has had [`GIVE_UP_AFTER`]: it is recorded in the ledger as refused, with
+    /// the last reason, so it is skipped from then on — across restarts — and
+    /// counted, rather than retried first in its feed on every pass.
+    fn charge(
+        &mut self,
+        w: &Work,
+        judged_feed: &JudgedFeed<R>,
+        version: &str,
+        reason: &str,
+        pass: &mut JudgePass,
+        errors: &mut Vec<String>,
+    ) {
+        let attempts = self.failures.entry(w.id.clone()).or_insert(0);
+        *attempts += 1;
+        if *attempts < GIVE_UP_AFTER {
+            return;
+        }
+        let attempts = *attempts;
+        self.failures.remove(&w.id);
+        match self.ledger.record(JudgeEntry {
+            object_key: w.id.key.clone(),
+            object_sha256: w.id.sha256.clone(),
+            rule_set_version: version.to_owned(),
+            feed: judged_feed.feed.clone(),
+            judged_at_ns: now_unix_nanos(),
+            refused: Some(format!(
+                "gave up after {attempts} failed attempts: {reason}"
+            )),
+        }) {
+            Ok(()) => {
+                self.metrics
+                    .conformance_refused(ConformanceRefusal::GivenUp, 1);
+                errors.push(format!(
+                    "conformance {}: gave up on {} after {attempts} failed attempts",
+                    judged_feed.feed, w.id.key
+                ));
+            }
+            Err(e) => {
+                pass.failed += 1;
+                self.metrics.error(ErrorKind::Ledger, now_unix_seconds());
+                errors.push(e.to_string());
+            }
+        }
     }
 
     fn count_refusals(&self, refused: &Refused) {
@@ -408,6 +487,7 @@ pub fn record_judged(
             rule_set_version: h.rule_set_version,
             feed: h.feed,
             judged_at_ns: now_unix_nanos(),
+            refused: None,
         }) {
             Ok(()) => {
                 recorded += 1;
@@ -499,6 +579,27 @@ mod tests {
         metrics: &LoaderMetrics,
         max_objects: usize,
     ) -> (JudgePass, Vec<String>) {
+        judge_pass_carrying(
+            host,
+            rows,
+            feeds,
+            ledger,
+            metrics,
+            max_objects,
+            &mut std::collections::HashMap::new(),
+        )
+    }
+
+    /// The same, with the failed attempts carried in from earlier passes.
+    fn judge_pass_carrying(
+        host: &Host,
+        rows: &Path,
+        feeds: &[JudgedFeed<StubRuleSet>],
+        ledger: &mut JudgeLedger,
+        metrics: &LoaderMetrics,
+        max_objects: usize,
+        failures: &mut std::collections::HashMap<ObjectId, u32>,
+    ) -> (JudgePass, Vec<String>) {
         let scratch = host.dir.path().join("scratch");
         std::fs::create_dir_all(&scratch).expect("scratch");
         let mut sink = FileSink::create(rows).expect("a sink");
@@ -514,6 +615,7 @@ mod tests {
             sink: &mut sink,
             metrics,
             held: &mut held,
+            failures,
         }
         .run_once(&|| false);
         sink.flush(0).expect("flushed");
@@ -638,14 +740,115 @@ mod tests {
         broken.broken = true;
         let runs = std::rc::Rc::clone(&broken.runs);
         let (pass, errors) = judge_pass(&host, &rows, &feed(broken), &mut ledger, &metrics, 0);
-        assert_eq!((pass.judged, pass.failed, pass.unjudged), (0, 1, 3));
-        assert_eq!(runs.borrow().len(), 1, "one attempt, not one per object");
+        assert_eq!((pass.judged, pass.failed, pass.unjudged), (0, 2, 3));
+        assert_eq!(
+            runs.borrow().len(),
+            2,
+            "two objects in a row, then the feed waits: not one attempt per object"
+        );
         assert_eq!(ledger.entries(), 0);
         assert_eq!(findings(&rows), 0, "never a table of unverifiable");
         assert!(!errors.is_empty());
         assert!(metrics.render().contains(
-            "dz_loader_conformance_refused_total{reason=\"tool_could_not_run\",recorder=\"recorder-1\",site=\"site-1\"} 1"
+            "dz_loader_conformance_refused_total{reason=\"tool_failed_on_object\",recorder=\"recorder-1\",site=\"site-1\"} 2"
         ));
+    }
+
+    /// One object that makes the rule set fail does not hold back the
+    /// objects behind it: the next is judged in the same pass.
+    #[test]
+    fn an_object_the_rule_set_fails_on_does_not_stall_the_feed() {
+        let host = host(3);
+        let metrics = LoaderMetrics::new(SITE, RECORDER);
+        let rows = host.dir.path().join("rows");
+        let mut ledger = JudgeLedger::in_memory();
+        let mut first_fails = clean();
+        first_fails.fail_runs.insert(0);
+        let (pass, _) = judge_pass(&host, &rows, &feed(first_fails), &mut ledger, &metrics, 0);
+        assert_eq!((pass.judged, pass.failed, pass.unjudged), (2, 1, 1));
+        assert_eq!(findings(&rows), 2);
+    }
+
+    /// A binary that cannot start is nothing to do with any object: the feed
+    /// stops at the first attempt, and no object is charged with it.
+    #[test]
+    fn a_binary_that_cannot_start_stops_the_feed_at_once() {
+        let host = host(3);
+        let metrics = LoaderMetrics::new(SITE, RECORDER);
+        let rows = host.dir.path().join("rows");
+        let mut ledger = JudgeLedger::in_memory();
+        let mut missing = clean();
+        missing.not_started = true;
+        let runs = std::rc::Rc::clone(&missing.runs);
+        let mut failures = std::collections::HashMap::new();
+        let (pass, _) = judge_pass_carrying(
+            &host,
+            &rows,
+            &feed(missing),
+            &mut ledger,
+            &metrics,
+            0,
+            &mut failures,
+        );
+        assert_eq!(runs.borrow().len(), 1);
+        assert_eq!((pass.judged, pass.failed, pass.unjudged), (0, 1, 3));
+        assert!(failures.is_empty(), "no object is charged with the binary");
+    }
+
+    /// An object that fails every attempt is given up on after three, recorded
+    /// as refused, and stops being tried — on this runner and the next.
+    #[test]
+    fn an_object_that_always_fails_is_given_up_on_after_three_attempts() {
+        let host = host(3);
+        let metrics = LoaderMetrics::new(SITE, RECORDER);
+        let rows = host.dir.path().join("rows");
+        let ledger_path = host.dir.path().join("judged.jsonl");
+        let mut ledger = JudgeLedger::open(&ledger_path).expect("ledger");
+        // Runs 0, 3 and 4 are the same object's attempts: it is first in
+        // every pass, and the other two are judged in the first.
+        let mut poisoned = clean();
+        poisoned.fail_runs.extend([0, 3, 4]);
+        let runs = std::rc::Rc::clone(&poisoned.runs);
+        let feeds = feed(poisoned);
+        let mut failures = std::collections::HashMap::new();
+        let mut last = JudgePass::default();
+        for _ in 0..3 {
+            last = judge_pass_carrying(
+                &host,
+                &rows,
+                &feeds,
+                &mut ledger,
+                &metrics,
+                0,
+                &mut failures,
+            )
+            .0;
+        }
+        assert_eq!(runs.borrow().len(), 5);
+        assert_eq!(last.unjudged, 0, "given up on, so no longer waiting");
+        assert!(failures.is_empty());
+
+        let reopened = JudgeLedger::open(&ledger_path).expect("reopened");
+        assert_eq!(reopened.entries(), 3);
+        let (pass, _) = judge_pass_carrying(
+            &host,
+            &rows,
+            &feeds,
+            &mut ledger,
+            &metrics,
+            0,
+            &mut failures,
+        );
+        assert_eq!(runs.borrow().len(), 5, "not tried again");
+        assert_eq!(pass.failed, 0);
+        assert!(metrics.render().contains(
+            "dz_loader_conformance_refused_total{reason=\"given_up\",recorder=\"recorder-1\",site=\"site-1\"} 1"
+        ));
+        assert_eq!(
+            findings(&rows),
+            2,
+            "no finding vouches for the refused object"
+        );
     }
 
     /// The pass bound is the load's: a runner far behind still publishes its
