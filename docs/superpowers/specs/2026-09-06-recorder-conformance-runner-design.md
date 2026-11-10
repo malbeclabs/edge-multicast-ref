@@ -149,7 +149,11 @@ rule's own message and the missing range in `detail`, and the attribution lives
 where it already lives — in `sequence_gap`, decided by the deriver that has the
 admitted drops and the scope they are valid at.
 
-This is computable in the same pass and needs nothing outside the object.
+This is computable in the same pass and needs nothing outside the object. It is
+computed **per multicast group**: the rule set reads one group's datagrams at a
+time, and a channel instance is keyed with no group, so a sequence number lost
+in one group and delivered in another is a hole in the first group's file that a
+single derivation over both would see as delivered.
 `dz-recorder-loss` already produces, per instance, a `Vec<SequenceRun>` carrying
 `instance`, `era_ordinal`, `reset_count`, `missing_from` and `missing_to`; the
 downgrade is an overlap test between a rule's evidence range and those runs. It
@@ -453,6 +457,21 @@ happened would move the `unverifiable` share panel — the panel that is suppose
 to measure how often the archive opens the gate — every time a binary went
 missing. The object stays unjudged, a counter rises, and the absence of rows is
 the honest record.
+
+Two failures go under that heading, and they are kept apart because they stall
+different things. **A binary that cannot be started** is nothing to do with any
+object: every object of the feed would fail the same way, so the feed waits for
+the next pass and no object is charged with it. **A rule set that fails on one
+object** — exit 2, death on a signal, a report it did not write or cannot be
+read — may judge the next one; one capture can do that to a binary that judges
+everything else. The runner moves on to the feed's next object, and stops the
+feed for the pass only when two objects in a row fail that way. An object is
+given **three** attempts across passes; after the third it is recorded in the
+runner's ledger as *refused*, with the reason, and is skipped from then on and
+counted. Without that bound an object that makes the rule set fail would sort
+first in its feed on every pass and hold back every object behind it until it
+was evicted. A refused entry carries no finding: the window has coverage and no
+verdict, which is the honest reading.
 
 The same reasoning forbids the tempting shortcut of inferring `pass` from exit 0.
 Exit 0 means *found no violations*, and the snapshot negative control above is a

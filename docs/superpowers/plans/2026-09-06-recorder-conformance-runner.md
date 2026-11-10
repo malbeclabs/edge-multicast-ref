@@ -292,7 +292,11 @@ which is the same failure `magic` is required to prevent one layer down.
 
 Its own lag pair, and counters for each refusal the spec names: a tool that could
 not run, a verdict naming no instance, an unresolvable version, and a
-configuration that disagrees with the tool.
+configuration that disagrees with the tool. A binary that cannot start stops its
+feed for the pass; a rule set that fails on one object moves on to the next,
+stops the feed only after two such objects in a row, and gives an object three
+attempts before recording it as refused (spec, *A rule set the runner does not
+recognise*).
 
 **Verification:** unit tests in the loader. A configuration that says nothing
 judges nothing, prints no conformance line, and — asserted against the datagram
