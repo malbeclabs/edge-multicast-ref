@@ -136,7 +136,15 @@ dropped before demultiplexing. A rule set handed a replayed archive sees a hole
 and has no way to learn whose it was.
 
 **So the runner never writes a `violation` whose evidence range overlaps a hole
-this same object's loss derivation found.** It writes `unverifiable`, with the
+this same object's loss derivation found.** Two refinements keep that test
+honest. Where the report states an `era_index` — the era's ordinal on the
+instance, which unlike the `Reset Count` does not wrap — a range and a hole must
+agree on it as well as on the `Reset Count`; where it does not, the `Reset Count`
+alone decides, which can only match more holes. And the loss derivation is
+bounded: where it refused eras or delivered ranges on an instance, or refused
+whole instances, its runs are an under-count, so every `violation` and `pass` on
+an affected instance — on every instance, if it could not say which — is
+`unverifiable` with the reason in `detail`. It writes `unverifiable`, with the
 rule's own message and the missing range in `detail`, and the attribution lives
 where it already lives — in `sequence_gap`, decided by the deriver that has the
 admitted drops and the scope they are valid at.
@@ -381,8 +389,8 @@ The rest of the row's key is resolved, never guessed:
 - `channel_id` is the one the rule set stated. An entry that names neither an
   instance nor a channel is still refused and counted.
 - `dst_port` is **the one port the recorder joined, in the group being judged,
-  for the port role the rule set stated** — and only if that channel appears on
-  it in the object's manifest. No role stated, no port joined for it, more than
+  for the port role the rule set stated** — and only if that channel arrived on
+  it *in that group* in this object. No role stated, no port joined for it, more than
   one port joined for it, or a channel that never appeared there: each is
   refused and counted (`channel_unresolved`), because a row key the runner chose
   is a finding placed on a guess.
@@ -400,6 +408,11 @@ path's sequence space rather than one:
 - **`first_seq` and `last_seq` are 0.** No one range describes a channel, and
   one path's numbers presented as the channel's would send a reader to a single
   sequence space the verdict was not about.
+
+An entry the rule set marks `overflow` — a finding about a path it stopped
+tracking at its address cap — names no instance and is **never** a channel row:
+it is about one path, unknown, not about every path. It is refused and counted
+(`overflow`).
 
 A channel row and an instance row for the same rule over the same window are
 two keys — `source_addr` is in the sort key — so both stand. The reduction of
