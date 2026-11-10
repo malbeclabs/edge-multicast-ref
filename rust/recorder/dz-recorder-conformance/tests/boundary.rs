@@ -44,7 +44,7 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// What the stand-in leaves where `-json-report` pointed.
+/// What the stand-in leaves where `-rule-report` pointed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Report {
     /// Nothing at all, which the tool does when it fails before it can write.
@@ -223,7 +223,7 @@ impl StandIns {
              out=\"\"\n\
              pcap=\"\"\n\
              for a in \"$@\"; do\n\
-             \x20 [ \"$prev\" = \"-json-report\" ] && out=\"$a\"\n\
+             \x20 [ \"$prev\" = \"-rule-report\" ] && out=\"$a\"\n\
              \x20 [ \"$prev\" = \"-pcap\" ] && pcap=\"$a\"\n\
              \x20 prev=\"$a\"\n\
              done\n\
@@ -659,8 +659,12 @@ fn a_role_nobody_joined_leaves_its_flag_unset() {
     );
     assert!(!argv.contains(&"-refdata-port".to_owned()), "{argv:?}");
     assert!(
-        argv.contains(&"-json-report".to_owned()),
-        "the report is asked for by the same invocation that judges: {argv:?}"
+        argv.contains(&"-rule-report".to_owned()),
+        "the placed report is asked for by the same invocation that judges: {argv:?}"
+    );
+    assert!(
+        !argv.contains(&"-json-report".to_owned()),
+        "and not the counts, which place nothing: {argv:?}"
     );
     assert!(
         argv.contains(&GROUP.to_string()),

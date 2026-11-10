@@ -1,0 +1,248 @@
+{
+  "report_format": 1,
+  "feed": "mbp",
+  "version": "v0.0.0-test",
+  "commit": "abc123def456",
+  "read_error": "",
+  "capture_drops": 0,
+  "rules": [
+    {
+      "rule_id": "FRAME.LENGTH_CONSISTENCY",
+      "outcome": "violation",
+      "severity": "must",
+      "instance": {
+        "source": "127.0.0.1",
+        "channel_id": 0,
+        "dst_port": 51000
+      },
+      "evidence": {
+        "reset_count": 2,
+        "first_seq": 4514,
+        "last_seq": 4601
+      },
+      "channel_id": 0,
+      "port_role": "snapshot",
+      "count": 88,
+      "detail": "frame length 1464 out of [24,1232]"
+    },
+    {
+      "rule_id": "FRAME.LENGTH_CONSISTENCY",
+      "outcome": "violation",
+      "severity": "must",
+      "instance": {
+        "source": "127.0.0.1",
+        "channel_id": 0,
+        "dst_port": 51000
+      },
+      "evidence": {
+        "reset_count": 2,
+        "first_seq": 4613,
+        "last_seq": 4710
+      },
+      "channel_id": 0,
+      "port_role": "snapshot",
+      "count": 98,
+      "detail": "frame length 1464 out of [24,1232]"
+    },
+    {
+      "rule_id": "FRAME.LENGTH_CONSISTENCY",
+      "outcome": "violation",
+      "severity": "must",
+      "instance": {
+        "source": "127.0.0.1",
+        "channel_id": 0,
+        "dst_port": 51000
+      },
+      "evidence": {
+        "reset_count": 2,
+        "first_seq": 4724,
+        "last_seq": 4785
+      },
+      "channel_id": 0,
+      "port_role": "snapshot",
+      "count": 62,
+      "detail": "frame length 1464 out of [24,1232]"
+    },
+    {
+      "rule_id": "FRAME.LENGTH_CONSISTENCY",
+      "outcome": "violation",
+      "severity": "must",
+      "instance": {
+        "source": "127.0.0.1",
+        "channel_id": 0,
+        "dst_port": 51000
+      },
+      "evidence": {
+        "reset_count": 2,
+        "first_seq": 4798,
+        "last_seq": 5000
+      },
+      "channel_id": 0,
+      "port_role": "snapshot",
+      "count": 203,
+      "detail": "frame length 1464 out of [24,1232]"
+    },
+    {
+      "rule_id": "FRAME.LENGTH_CONSISTENCY",
+      "outcome": "violation",
+      "severity": "must",
+      "instance": {
+        "source": "127.0.0.1",
+        "channel_id": 0,
+        "dst_port": 51000
+      },
+      "evidence": {
+        "reset_count": 2,
+        "first_seq": 5038,
+        "last_seq": 5125
+      },
+      "channel_id": 0,
+      "port_role": "snapshot",
+      "count": 88,
+      "detail": "frame length 1464 out of [24,1232]"
+    },
+    {
+      "rule_id": "FRAME.LENGTH_CONSISTENCY",
+      "outcome": "violation",
+      "severity": "must",
+      "instance": {
+        "source": "127.0.0.1",
+        "channel_id": 0,
+        "dst_port": 51000
+      },
+      "evidence": {
+        "reset_count": 2,
+        "first_seq": 5137,
+        "last_seq": 5216
+      },
+      "channel_id": 0,
+      "port_role": "snapshot",
+      "count": 80,
+      "detail": "frame length 1464 out of [24,1232]"
+    },
+    {
+      "rule_id": "FRAME.SCHEMA_VERSION_SUPERSEDED",
+      "outcome": "violation",
+      "severity": "info",
+      "instance": {
+        "source": "127.0.0.1",
+        "channel_id": 0,
+        "dst_port": 31000
+      },
+      "evidence": {
+        "reset_count": 2,
+        "first_seq": 6663,
+        "last_seq": 7941
+      },
+      "channel_id": 0,
+      "port_role": "mktdata",
+      "count": 1279,
+      "detail": "schema version 1 is supported but not current (3)"
+    },
+    {
+      "rule_id": "FRAME.SCHEMA_VERSION_SUPERSEDED",
+      "outcome": "violation",
+      "severity": "info",
+      "instance": {
+        "source": "127.0.0.1",
+        "channel_id": 0,
+        "dst_port": 41000
+      },
+      "evidence": {
+        "reset_count": 2,
+        "first_seq": 48,
+        "last_seq": 53
+      },
+      "channel_id": 0,
+      "port_role": "refdata",
+      "count": 6,
+      "detail": "schema version 1 is supported but not current (3)"
+    },
+    {
+      "rule_id": "FRAME.SCHEMA_VERSION_SUPERSEDED",
+      "outcome": "violation",
+      "severity": "info",
+      "instance": {
+        "source": "127.0.0.1",
+        "channel_id": 0,
+        "dst_port": 51000
+      },
+      "evidence": {
+        "reset_count": 2,
+        "first_seq": 4501,
+        "last_seq": 5216
+      },
+      "channel_id": 0,
+      "port_role": "snapshot",
+      "count": 716,
+      "detail": "schema version 1 is supported but not current (3)"
+    },
+    {
+      "rule_id": "MBP.SNAP.GROUP_STRUCTURE",
+      "outcome": "pass",
+      "severity": "must",
+      "channel_id": 0,
+      "port_role": "snapshot",
+      "count": 38,
+      "detail": "group (Snapshot ID 9) well-formed: 24 level(s) between Begin and End"
+    },
+    {
+      "rule_id": "MBP.SNAP.GROUP_STRUCTURE",
+      "outcome": "unverifiable",
+      "severity": "must",
+      "reason": "truncated",
+      "channel_id": 0,
+      "port_role": "snapshot",
+      "count": 1,
+      "detail": "SnapshotBegin (Snapshot ID 10) never followed by a SnapshotEnd: 3600 of 4429 level(s) seen at end of stream"
+    },
+    {
+      "rule_id": "MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT",
+      "outcome": "pass",
+      "severity": "must",
+      "channel_id": 0,
+      "port_role": "snapshot",
+      "count": 5,
+      "detail": "delta-reconstructed ladder matches the snapshot at Last Instrument Seq 489 (23 level(s))"
+    },
+    {
+      "rule_id": "MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT",
+      "outcome": "unverifiable",
+      "severity": "must",
+      "reason": "cold_start",
+      "channel_id": 0,
+      "port_role": "snapshot",
+      "count": 29,
+      "detail": "first completed group for this instrument: adopted as the baseline, nothing to compare against"
+    },
+    {
+      "rule_id": "MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT",
+      "outcome": "unverifiable",
+      "severity": "must",
+      "reason": "pending",
+      "channel_id": 0,
+      "port_role": "snapshot",
+      "count": 4,
+      "detail": "group's Last Instrument Seq 0 not yet applied from the delta port (at 0)"
+    },
+    {
+      "rule_id": "MSG.SNAPSHOT_FLAG_MATCHES_PORT",
+      "outcome": "violation",
+      "severity": "must",
+      "instance": {
+        "source": "127.0.0.1",
+        "channel_id": 0,
+        "dst_port": 41000
+      },
+      "evidence": {
+        "reset_count": 2,
+        "first_seq": 48,
+        "last_seq": 53
+      },
+      "channel_id": 0,
+      "port_role": "refdata",
+      "count": 6,
+      "detail": "type 0x07 on refdata port: Flags bit 0 is 1, expected 0"
+    }
+  ]
+}

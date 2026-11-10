@@ -264,12 +264,34 @@ impl ConformanceTool {
 
     /// Runs the tool and returns what it did, uninterpreted.
     ///
-    /// `report` is where the tool is asked to write its per-rule report, or
-    /// `None` for a caller that wants only the exit code.
+    /// `report` is where the tool is asked to write its per-rule **counts**
+    /// (`-json-report`), or `None` for a caller that wants only the exit code.
+    /// That file is the gate's: it says how many times a rule looked, and it
+    /// places nothing. The runner reads the placed report instead, through
+    /// [`RuleSet::judge`].
     pub fn run(
         &self,
         invocation: &Invocation<'_>,
         report: Option<&Path>,
+    ) -> Result<ToolRun, ToolError> {
+        self.run_with(invocation, report.map(|p| ("-json-report", p)))
+    }
+
+    /// The same, asking for the placed report (`-rule-report`): one entry per
+    /// rule outcome, per channel instance, with the evidence range in one era.
+    /// The shape [`RuleSetReport`] reads.
+    pub fn run_for_rules(
+        &self,
+        invocation: &Invocation<'_>,
+        rule_report: &Path,
+    ) -> Result<ToolRun, ToolError> {
+        self.run_with(invocation, Some(("-rule-report", rule_report)))
+    }
+
+    fn run_with(
+        &self,
+        invocation: &Invocation<'_>,
+        report: Option<(&str, &Path)>,
     ) -> Result<ToolRun, ToolError> {
         let mut cmd = Command::new(&self.path);
         cmd.arg("-feed")
@@ -288,8 +310,8 @@ impl ConformanceTool {
                     .arg(port.to_string());
             }
         }
-        if let Some(report) = report {
-            cmd.arg("-json-report").arg(report);
+        if let Some((flag, path)) = report {
+            cmd.arg(flag).arg(path);
         }
 
         let out = cmd.output().map_err(|e| ToolError::NotStarted {
@@ -318,7 +340,7 @@ impl RuleSet for ConformanceTool {
             })?;
         let report_path = dir.path().join("report.json");
 
-        let run = self.run(invocation, Some(&report_path))?;
+        let run = self.run_for_rules(invocation, &report_path)?;
         let code = match run.code {
             Some(EXIT_CLEAN) => EXIT_CLEAN,
             Some(EXIT_VIOLATION) => EXIT_VIOLATION,
