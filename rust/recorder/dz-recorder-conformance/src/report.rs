@@ -35,6 +35,7 @@
 
 use std::net::Ipv4Addr;
 
+use dz_edge_core::PortRole;
 use dz_recorder_core::ChannelInstance;
 use serde::{Deserialize, Serialize};
 
@@ -126,6 +127,40 @@ pub struct RuleOutcome {
     /// The rule's own message, carried into the row's `detail` unaltered.
     #[serde(default)]
     pub detail: String,
+    /// The port roles the rule reads, beyond the instance it is placed on.
+    ///
+    /// What lets a rule that never ran be told from one that ran and held. A
+    /// rule anchored on the snapshot port and placed on a mktdata instance
+    /// names the snapshot role here; if the recorder never joined that role,
+    /// or joined it and received nothing, the rule judged nothing and its row
+    /// is `na` — decided from the manifest, above this module. Empty means the
+    /// rule set stated no such need, and nothing is inferred from the silence.
+    #[serde(default)]
+    pub needs: Vec<NeededRole>,
+}
+
+/// A port role, as a report names one.
+///
+/// Its own type rather than `PortRole`, for the reason [`ReportInstance`]
+/// spells its fields out: the report is a file another repository writes, and
+/// a token this runner does not know is a report it cannot read rather than a
+/// role it may guess at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NeededRole {
+    Mktdata,
+    Refdata,
+    Snapshot,
+}
+
+impl From<NeededRole> for PortRole {
+    fn from(role: NeededRole) -> Self {
+        match role {
+            NeededRole::Mktdata => Self::Mktdata,
+            NeededRole::Refdata => Self::Refdata,
+            NeededRole::Snapshot => Self::Snapshot,
+        }
+    }
 }
 
 /// One run of the rule set over one group's capture file.

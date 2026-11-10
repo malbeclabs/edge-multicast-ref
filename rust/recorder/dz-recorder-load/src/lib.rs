@@ -51,6 +51,7 @@
 #![forbid(unsafe_code)]
 
 pub mod config;
+pub mod conformance;
 pub mod ledger;
 pub mod loader;
 pub mod market_data;
