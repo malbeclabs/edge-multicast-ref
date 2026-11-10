@@ -14,7 +14,7 @@ use dz_recorder_archive::SegmentManifest;
 use dz_recorder_core::ChannelInstance;
 use dz_recorder_rows::{ConformanceFinding, Derivation, FindingVerdict, Nanos, PortRoleLabel};
 
-use super::findings::{with_note, Placed};
+use super::findings::{with_note, Placed, Subject};
 
 /// How bad a verdict is, for the reduction.
 ///
@@ -92,8 +92,14 @@ fn row(stamp: &RunStamp<'_>, group: &[&Placed<'_>]) -> ConformanceFinding {
         .filter(|e| Some(e.reset_count) == era)
         .map(|e| (e.first_seq, e.last_seq))
         .collect();
-    let (first_seq, last_seq) = if ranges.is_empty() {
-        (first.coverage.first_seq, first.coverage.last_seq)
+    let (first_seq, last_seq) = if first.subject == Subject::Channel {
+        // A channel row spans every path's sequence space, and no one range
+        // describes it. 0/0, which no instance row ever states with a window
+        // that held datagrams, rather than one path's numbers presented as the
+        // channel's.
+        (0, 0)
+    } else if let (true, Some(coverage)) = (ranges.is_empty(), first.coverage) {
+        (coverage.first_seq, coverage.last_seq)
     } else {
         (
             ranges.iter().map(|r| r.0).min().unwrap_or(0),
@@ -259,6 +265,31 @@ mod tests {
         assert_eq!(r.object_key, "feed=market-by-price/obj-7");
         assert_eq!(r.derivation, Derivation::Archive);
         assert_eq!((r.first_seq, r.last_seq), (3, 4));
+    }
+
+    /// A channel row states 0/0: it spans every path's sequence space, and no
+    /// one range describes it.
+    #[test]
+    fn a_channel_row_states_no_sequence_range() {
+        let mut e = entry("TEST.CHANNEL_WIDE", Outcome::Violation, None);
+        e.channel_id = Some(1);
+        e.port_role = Some(dz_recorder_conformance::NeededRole::Mktdata);
+        let rows = rows_for(vec![
+            e,
+            ranged("TEST.CHANNEL_WIDE", Outcome::Pass, MKTDATA, 3, 4),
+        ]);
+        assert_eq!(
+            rows.len(),
+            2,
+            "a channel row and an instance row: {rows:#?}"
+        );
+        let channel = rows
+            .iter()
+            .find(|r| r.source_addr == std::net::Ipv4Addr::UNSPECIFIED)
+            .expect("the channel row");
+        assert_eq!(channel.verdict, FindingVerdict::Violation);
+        assert_eq!((channel.first_seq, channel.last_seq), (0, 0));
+        assert_eq!(channel.dst_port, MKTDATA);
     }
 
     /// Where the winning verdict cites no range, the instance's coverage

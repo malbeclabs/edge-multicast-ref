@@ -331,6 +331,8 @@ pub(crate) mod tests {
             }),
             detail: String::new(),
             needs: Vec::new(),
+            channel_id: None,
+            port_role: None,
         }
     }
 
@@ -515,6 +517,33 @@ pub(crate) mod tests {
         .expect("judged")
         .batch
         .conformance_finding
+    }
+
+    /// A channel row and an instance row for the same rule over the same
+    /// window are two keys: both stand.
+    #[test]
+    fn a_channel_row_and_an_instance_row_for_one_rule_both_stand() {
+        let (_dir, recorded) = record(&SyntheticPublisher::clean(50));
+        let scratch = tempfile::tempdir().expect("scratch");
+        let mut channel_wide = on_mktdata("TEST.ONE", Outcome::Pass, 0, 49);
+        channel_wide.instance = None;
+        channel_wide.channel_id = Some(CHANNEL_ID);
+        channel_wide.port_role = Some(dz_recorder_conformance::NeededRole::Mktdata);
+        let stub = StubRuleSet::stating(vec![
+            on_mktdata("TEST.ONE", Outcome::Pass, 0, 49),
+            channel_wide,
+        ]);
+        let rows = judge(&recorded, stub, scratch.path())
+            .expect("judged")
+            .batch
+            .conformance_finding;
+        assert_eq!(rows.len(), 2);
+        let m = merged(&rows);
+        assert_eq!(m.len(), 2, "{m:#?}");
+        assert!(m
+            .iter()
+            .any(|r| r.source_addr == std::net::Ipv4Addr::UNSPECIFIED));
+        assert!(m.iter().any(|r| r.source_addr == PRIMARY_SOURCE));
     }
 
     #[test]

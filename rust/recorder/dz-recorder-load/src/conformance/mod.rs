@@ -7,8 +7,9 @@
 //! What this module decides is only what a verdict the rule set stated may be
 //! written as, over this object:
 //!
-//! - **where it goes** — the channel instance the rule set named, and no other
-//!   ([`findings`]);
+//! - **where it goes** — the channel instance the rule set named, and no other;
+//!   or, for a rule decided over state every path of a channel fills, the
+//!   channel itself, at source address `0.0.0.0` ([`findings`]);
 //! - **whether the rule ran at all** — a port role the recorder never joined, or
 //!   joined and received nothing on, makes the rule `na` ([`findings`]);
 //! - **whether a violation is the publisher's to answer for** — not when its
@@ -43,15 +44,19 @@ pub enum ConformanceRefusal {
     NoInstance,
     /// A stated verdict naming an instance the manifest does not describe.
     UndescribedInstance,
+    /// A channel-grain verdict whose port could not be resolved to one the
+    /// recorder joined for the role it states.
+    ChannelUnresolved,
 }
 
 impl ConformanceRefusal {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::ToolCouldNotRun,
         Self::VersionUnresolvable,
         Self::VersionDisagrees,
         Self::NoInstance,
         Self::UndescribedInstance,
+        Self::ChannelUnresolved,
     ];
 
     #[must_use]
@@ -62,6 +67,7 @@ impl ConformanceRefusal {
             Self::VersionDisagrees => "version_disagrees",
             Self::NoInstance => "no_instance",
             Self::UndescribedInstance => "undescribed_instance",
+            Self::ChannelUnresolved => "channel_unresolved",
         }
     }
 }

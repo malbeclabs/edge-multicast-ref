@@ -188,6 +188,10 @@ impl<S: RowSink, R: RuleSet + Clone> Judge<'_, S, R> {
                     ConformanceRefusal::UndescribedInstance,
                     judged.refused.undescribed_instance,
                 );
+                self.metrics.conformance_refused(
+                    ConformanceRefusal::ChannelUnresolved,
+                    judged.refused.channel_unresolved,
+                );
                 for (rule, count) in &judged.refused.no_instance_by_rule {
                     self.metrics.conformance_unplaced(rule, *count);
                 }

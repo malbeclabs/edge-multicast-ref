@@ -397,15 +397,17 @@ impl LoaderMetrics {
                  version_unresolvable and version_disagrees leave objects unjudged and write \
                  nothing — never a table of unverifiable. no_instance and \
                  undescribed_instance are verdicts the rule set stated that could not be placed \
-                 on a channel instance, counted rather than filed under a guess.",
+                 on a channel instance, counted rather than filed under a guess. \
+                 channel_unresolved is a channel-grain verdict whose port could not be \
+                 resolved to the one the recorder joined for the role it states.",
                 &labels,
                 &["reason"],
             ),
             conformance_unplaced_total: counter_vec(
                 &registry,
                 "dz_loader_conformance_unplaced_total",
-                "Verdicts the rule set placed on no channel instance, by rule — the volume of \
-                 what conformance_finding does not yet hold. rule_id is the rule set's own, \
+                "Verdicts the rule set placed on neither a channel instance nor a channel, by \
+                 rule — the volume of what conformance_finding does not hold. rule_id is the rule set's own, \
                  carried through opaquely.",
                 &labels,
                 &["rule_id"],

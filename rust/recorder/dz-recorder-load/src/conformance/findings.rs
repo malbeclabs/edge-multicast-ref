@@ -129,6 +129,20 @@ impl Holes {
         })
     }
 
+    /// Any hole on any path of one channel and port: every source address that
+    /// carried `channel_id` to `dst_port` in this object.
+    #[must_use]
+    pub fn first_on_channel(
+        &self,
+        channel_id: u8,
+        dst_port: u16,
+    ) -> Option<(ChannelInstance, Hole)> {
+        self.by_instance
+            .iter()
+            .filter(|(i, _)| i.channel_id == channel_id && i.dst_port == dst_port)
+            .find_map(|(i, holes)| holes.first().map(|h| (*i, *h)))
+    }
+
     /// Any hole at all on `instance`.
     #[must_use]
     pub fn first_on(&self, instance: &ChannelInstance) -> Option<Hole> {
@@ -280,19 +294,18 @@ pub fn unrun(manifest: &SegmentManifest, group: Ipv4Addr, entry: &RuleOutcome) -
 /// guess.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Refused {
-    /// The rule set named no instance. A finding on the wrong instance sends a
-    /// reader to a sequence space where the evidence is not, so none is chosen.
-    ///
-    /// Today this is every rule the rule set decides over state every path of a
-    /// channel fills — the book, the snapshot groups, the reference data — which
-    /// it places on no instance by design. Counted by rule as well, so the
-    /// volume of what this table does not yet hold is a number rather than an
-    /// absence.
+    /// The rule set named neither an instance nor a channel. A finding on the
+    /// wrong instance sends a reader to a sequence space where the evidence is
+    /// not, so none is chosen. Counted by rule as well.
     pub no_instance: u64,
     /// The rule set named an instance this object's manifest does not describe,
     /// or one on a port the recorder did not join in that group — so there is
     /// no coverage to state its window by and no role to file it under.
     pub undescribed_instance: u64,
+    /// A rule decided at channel grain whose port could not be resolved to one
+    /// the recorder joined, in this group, for the role the rule stated — or
+    /// whose channel never appeared on it. Without a port there is no row key.
+    pub channel_unresolved: u64,
     /// `no_instance`, by rule. The rule id is the rule set's, carried through
     /// opaquely; nothing here knows what any of them mean.
     pub no_instance_by_rule: BTreeMap<String, u64>,
@@ -302,6 +315,7 @@ impl Refused {
     pub fn add(&mut self, other: &Self) {
         self.no_instance += other.no_instance;
         self.undescribed_instance += other.undescribed_instance;
+        self.channel_unresolved += other.channel_unresolved;
         for (rule, n) in &other.no_instance_by_rule {
             *self.no_instance_by_rule.entry(rule.clone()).or_default() += n;
         }
@@ -309,19 +323,41 @@ impl Refused {
 
     #[must_use]
     pub const fn total(&self) -> u64 {
-        self.no_instance + self.undescribed_instance
+        self.no_instance + self.undescribed_instance + self.channel_unresolved
     }
+}
+
+/// The source address a channel-grain row carries.
+///
+/// `0.0.0.0` means *decided over state every path of the channel fills; no
+/// single publisher is the subject* — the same statement the rule set's own
+/// metrics make with an empty `source_addr`. It is unambiguous because it is
+/// never a publisher's address: `0.0.0.0` is the unspecified address, which no
+/// host sends from, so no datagram in an archive carries it.
+pub const CHANNEL_SOURCE: Ipv4Addr = Ipv4Addr::UNSPECIFIED;
+
+/// What a placed verdict is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Subject {
+    /// One path's view of one channel: the instance the rule set named.
+    Instance,
+    /// The channel on one port, over every path: the instance's source is
+    /// [`CHANNEL_SOURCE`].
+    Channel,
 }
 
 /// One stated verdict, placed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Placed<'a> {
     pub entry: &'a RuleOutcome,
+    /// For a channel row, `CHANNEL_SOURCE` with the channel and its port.
     pub instance: ChannelInstance,
+    pub subject: Subject,
     /// The role the recorder joined the instance's port as.
     pub role: PortRole,
-    /// The instance's coverage in this object, which states the row's window.
-    pub coverage: &'a InstanceCoverage,
+    /// The instance's coverage in this object. `None` for a channel row,
+    /// which spans several sequence spaces and so has no one coverage.
+    pub coverage: Option<&'a InstanceCoverage>,
     pub verdict: FindingVerdict,
     pub detail: String,
 }
@@ -351,32 +387,54 @@ pub fn place<'a>(
     let mut placed = Vec::with_capacity(report.rules.len());
     let mut refused = Refused::default();
     for entry in &report.rules {
-        let Some(named) = entry.instance else {
-            refused.no_instance += 1;
-            *refused
-                .no_instance_by_rule
-                .entry(entry.rule_id.clone())
-                .or_default() += 1;
-            continue;
-        };
-        let instance = ChannelInstance::from(named);
-        let (Some(coverage), Some(role)) = (
-            manifest.instances.get(&instance),
-            role_on(manifest, group, instance.dst_port),
-        ) else {
-            refused.undescribed_instance += 1;
-            continue;
+        let (instance, subject, role, coverage) = match entry.instance {
+            Some(named) => {
+                let instance = ChannelInstance::from(named);
+                let (Some(coverage), Some(role)) = (
+                    manifest.instances.get(&instance),
+                    role_on(manifest, group, instance.dst_port),
+                ) else {
+                    refused.undescribed_instance += 1;
+                    continue;
+                };
+                (instance, Subject::Instance, role, Some(coverage))
+            }
+            None => {
+                let Some(channel_id) = entry.channel_id else {
+                    refused.no_instance += 1;
+                    *refused
+                        .no_instance_by_rule
+                        .entry(entry.rule_id.clone())
+                        .or_default() += 1;
+                    continue;
+                };
+                let Some((dst_port, role)) = channel_port(manifest, group, channel_id, entry)
+                else {
+                    refused.channel_unresolved += 1;
+                    continue;
+                };
+                (
+                    ChannelInstance::new(CHANNEL_SOURCE, channel_id, dst_port),
+                    Subject::Channel,
+                    role,
+                    None,
+                )
+            }
         };
         let (verdict, detail) = match unrun(manifest, group, entry) {
             // Before the stated outcome, whatever it is: a rule that read a
             // role nothing arrived on judged nothing, and a verdict it stated
             // over that nothing is not one this table may carry.
             Some(why) => (FindingVerdict::Na, with_note(&entry.detail, &why.note())),
-            None => downgraded(entry, &instance, holes),
+            None => match subject {
+                Subject::Instance => downgraded(entry, &instance, holes),
+                Subject::Channel => channel_downgraded(entry, &instance, holes),
+            },
         };
         placed.push(Placed {
             entry,
             instance,
+            subject,
             role,
             coverage,
             verdict,
@@ -384,6 +442,74 @@ pub fn place<'a>(
         });
     }
     (placed, refused)
+}
+
+/// The port a channel-grain entry's evidence arrived on: the one port the
+/// recorder joined, in this group, for the role the entry states — and only if
+/// the channel appears on it in this object.
+///
+/// `None` when the entry states no role, when the group joined that role on
+/// no port or on more than one, or when no path carried the channel to that
+/// port. Every one of those is a row key this runner would be guessing at.
+fn channel_port(
+    manifest: &SegmentManifest,
+    group: Ipv4Addr,
+    channel_id: u8,
+    entry: &RuleOutcome,
+) -> Option<(u16, PortRole)> {
+    let role = PortRole::from(entry.port_role?);
+    let mut ports: Vec<u16> = manifest
+        .roles_joined
+        .iter()
+        .filter(|j| j.group == group && role_named(&j.role) == Some(role))
+        .map(|j| j.port)
+        .collect();
+    ports.sort_unstable();
+    ports.dedup();
+    let [port] = ports[..] else {
+        return None;
+    };
+    manifest
+        .instances
+        .keys()
+        .any(|i| i.channel_id == channel_id && i.dst_port == port)
+        .then_some((port, role))
+}
+
+/// The stated verdict of a channel-grain rule, after this object's holes.
+///
+/// **Stricter than an instance's.** A channel rule is decided over state every
+/// path fills, and the evidence it cites does not lie in one sequence space —
+/// so a range cannot be held against one path's holes. A violation or a pass is
+/// `unverifiable` if *any* path that carried the channel to that port has *any*
+/// hole in this object: the state the rule judged may be missing exactly what
+/// that hole took.
+fn channel_downgraded(
+    entry: &RuleOutcome,
+    channel: &ChannelInstance,
+    holes: &Holes,
+) -> (FindingVerdict, String) {
+    let verdict = stated(entry.outcome);
+    if !matches!(verdict, FindingVerdict::Violation | FindingVerdict::Pass) {
+        return (verdict, entry.detail.clone());
+    }
+    match holes.first_on_channel(channel.channel_id, channel.dst_port) {
+        Some((path, hole)) => (
+            FindingVerdict::Unverifiable,
+            with_note(
+                &entry.detail,
+                &format!(
+                    "unverifiable: decided over every path of channel {} on port {}, and the \
+                     path from {} has {}",
+                    channel.channel_id,
+                    channel.dst_port,
+                    path.source,
+                    hole.note()
+                ),
+            ),
+        ),
+        None => (verdict, entry.detail.clone()),
+    }
 }
 
 /// The stated verdict, after this object's own holes.
@@ -538,6 +664,8 @@ pub(crate) mod tests {
             }),
             detail: format!("{rule_id} said so"),
             needs: Vec::new(),
+            channel_id: None,
+            port_role: None,
         }
     }
 
@@ -743,6 +871,102 @@ pub(crate) mod tests {
         );
     }
 
+    fn channel_wide(
+        rule: &str,
+        outcome: Outcome,
+        channel: Option<u8>,
+        role: Option<NeededRole>,
+    ) -> RuleOutcome {
+        let mut e = entry(rule, outcome, None);
+        e.evidence = None;
+        e.channel_id = channel;
+        e.port_role = role;
+        e
+    }
+
+    fn both_roles() -> SegmentManifest {
+        manifest(
+            vec![
+                joined(PortRole::Mktdata, GROUP, MKTDATA),
+                joined(PortRole::Snapshot, GROUP, SNAPSHOT),
+            ],
+            &[(MKTDATA, coverage(0, 99)), (SNAPSHOT, coverage(0, 9))],
+        )
+    }
+
+    /// A rule decided over every path of a channel names no instance; it is
+    /// written at channel grain, at source address 0.0.0.0, on the port the
+    /// recorder joined for the role the rule states.
+    #[test]
+    fn a_channel_scoped_entry_is_placed_on_the_channel_at_the_unspecified_address() {
+        let m = both_roles();
+        let r = report(vec![channel_wide(
+            "TEST.CHANNEL_WIDE",
+            Outcome::Pass,
+            Some(1),
+            Some(NeededRole::Snapshot),
+        )]);
+        let (placed, refused) = place(&m, GROUP, &r, &Holes::default());
+        assert_eq!(refused, Refused::default());
+        assert_eq!(placed.len(), 1);
+        let p = &placed[0];
+        assert_eq!(p.subject, Subject::Channel);
+        assert_eq!(
+            p.instance,
+            ChannelInstance::new(Ipv4Addr::UNSPECIFIED, 1, SNAPSHOT)
+        );
+        assert_eq!(p.role, PortRole::Snapshot);
+        assert_eq!(p.verdict, FindingVerdict::Pass);
+        assert!(
+            p.coverage.is_none(),
+            "no one sequence space describes a channel"
+        );
+    }
+
+    /// A channel row whose port cannot be resolved to exactly one joined port
+    /// that carried the channel has no key, and is refused and counted.
+    #[test]
+    fn a_channel_scoped_entry_whose_port_cannot_be_resolved_is_refused_and_counted() {
+        let m = both_roles();
+        let r = report(vec![
+            // Never joined.
+            channel_wide("TEST.A", Outcome::Pass, Some(1), Some(NeededRole::Refdata)),
+            // Joined, but this channel never appeared on it.
+            channel_wide("TEST.B", Outcome::Pass, Some(9), Some(NeededRole::Snapshot)),
+            // No role stated, so no port to look for.
+            channel_wide("TEST.C", Outcome::Pass, Some(1), None),
+            // Neither an instance nor a channel: refused as before.
+            channel_wide("TEST.D", Outcome::Pass, None, Some(NeededRole::Snapshot)),
+        ]);
+        let (placed, refused) = place(&m, GROUP, &r, &Holes::default());
+        assert!(placed.is_empty(), "{placed:?}");
+        assert_eq!(refused.channel_unresolved, 3);
+        assert_eq!(refused.no_instance, 1);
+        assert_eq!(
+            refused.no_instance_by_rule,
+            BTreeMap::from([("TEST.D".to_owned(), 1)])
+        );
+
+        // Two ports joined for one role in one group: which one is a guess.
+        let ambiguous = manifest(
+            vec![
+                joined(PortRole::Mktdata, GROUP, MKTDATA),
+                joined(PortRole::Snapshot, GROUP, SNAPSHOT),
+                joined(PortRole::Snapshot, GROUP, SNAPSHOT + 10),
+            ],
+            &[(MKTDATA, coverage(0, 99)), (SNAPSHOT, coverage(0, 9))],
+        );
+        let r = report(vec![channel_wide(
+            "TEST.A",
+            Outcome::Pass,
+            Some(1),
+            Some(NeededRole::Snapshot),
+        )]);
+        let (placed, refused) = place(&ambiguous, GROUP, &r, &Holes::default());
+        assert!(placed.is_empty());
+        assert_eq!(refused.channel_unresolved, 1);
+    }
+
     /// A role token the manifest spells some other way is not read as one.
     #[test]
     fn only_the_three_specified_role_tokens_are_roles() {
@@ -785,6 +1009,8 @@ mod downgrade_tests {
             }),
             detail: "the rule's own words".to_owned(),
             needs: Vec::new(),
+            channel_id: None,
+            port_role: None,
         }
     }
 
@@ -925,6 +1151,117 @@ mod downgrade_tests {
         };
         assert!(holes.overlapping(&instance, &at(7, 7)).is_some());
         assert!(holes.overlapping(&instance, &at(8, 8)).is_none());
+    }
+
+    fn channel_wide(outcome: Outcome, evidence: Option<(u8, u64, u64)>) -> RuleOutcome {
+        let mut e = stated(outcome, evidence);
+        e.instance = None;
+        e.channel_id = Some(CHANNEL_ID);
+        e.port_role = Some(dz_recorder_conformance::NeededRole::Mktdata);
+        e
+    }
+
+    /// A channel rule's evidence is not one sequence space, so its range is
+    /// not held against one path's holes: a hole on *any* path of the channel
+    /// makes its violation `unverifiable`, wherever the range it cites lies.
+    /// Judged by the instance rule instead, the violation below — cited far
+    /// from the hole — would stand, and it is a verdict over book state that
+    /// hole may have taken from.
+    #[test]
+    fn a_hole_on_any_path_of_the_channel_makes_a_channel_violation_unverifiable() {
+        let starved = SyntheticPublisher::clean(1000).starved(&[StarvationWindow {
+            first: 250,
+            count: 40,
+        }]);
+        let (_dir, recorded) = record(&starved);
+        let holes = recorded.holes();
+        let r = report(vec![channel_wide(Outcome::Violation, Some((0, 10, 12)))]);
+        let (placed, refused) = place(&recorded.manifest, GROUP, &r, &holes);
+        assert_eq!(refused, Refused::default());
+        assert_eq!(placed[0].subject, Subject::Channel);
+        assert_eq!(placed[0].instance.source, CHANNEL_SOURCE);
+        assert_eq!(
+            placed[0].verdict,
+            FindingVerdict::Unverifiable,
+            "a channel violation over a channel with a hole in it"
+        );
+        assert!(
+            placed[0].detail.contains("0:250-289 missing"),
+            "{}",
+            placed[0].detail
+        );
+        assert!(
+            placed[0].detail.contains(&PRIMARY_SOURCE.to_string()),
+            "the path that has the hole is named: {}",
+            placed[0].detail
+        );
+
+        // The instance rule, over the same range, would have let it stand:
+        // which is why channel rows do not use it.
+        let instance = ChannelInstance::new(PRIMARY_SOURCE, CHANNEL_ID, MKTDATA);
+        assert!(holes
+            .overlapping(
+                &instance,
+                &EvidenceRange {
+                    reset_count: 0,
+                    first_seq: 10,
+                    last_seq: 12
+                }
+            )
+            .is_none());
+
+        // A pass is held to the same rule; a clean channel keeps both.
+        let r = report(vec![channel_wide(Outcome::Pass, None)]);
+        let (placed, _) = place(&recorded.manifest, GROUP, &r, &holes);
+        assert_eq!(placed[0].verdict, FindingVerdict::Unverifiable);
+        for outcome in [Outcome::Violation, Outcome::Pass] {
+            let (verdict, _) = judged(
+                &SyntheticPublisher::clean(1000),
+                channel_wide(outcome, None),
+            );
+            assert_eq!(verdict, stated_verdict(outcome));
+        }
+    }
+
+    fn stated_verdict(outcome: Outcome) -> FindingVerdict {
+        match outcome {
+            Outcome::Violation => FindingVerdict::Violation,
+            _ => FindingVerdict::Pass,
+        }
+    }
+
+    /// A hole on a second publisher's path counts too: the channel is every
+    /// path's.
+    #[test]
+    fn a_hole_on_the_second_path_counts_for_the_channel() {
+        let mut holes = Holes::default();
+        holes.truncated(
+            ChannelInstance::new(
+                dz_recorder_replay::synthetic::SECOND_SOURCE,
+                CHANNEL_ID,
+                MKTDATA,
+            ),
+            0,
+            5,
+        );
+        let (_dir, recorded) = record(&SyntheticPublisher::clean(100));
+        let r = report(vec![channel_wide(Outcome::Violation, None)]);
+        let (placed, _) = place(&recorded.manifest, GROUP, &r, &holes);
+        assert_eq!(placed[0].verdict, FindingVerdict::Unverifiable);
+        // And a hole on another channel or another port does not.
+        let mut elsewhere = Holes::default();
+        elsewhere.truncated(
+            ChannelInstance::new(PRIMARY_SOURCE, CHANNEL_ID + 1, MKTDATA),
+            0,
+            5,
+        );
+        elsewhere.truncated(
+            ChannelInstance::new(PRIMARY_SOURCE, CHANNEL_ID, MKTDATA + 2),
+            0,
+            5,
+        );
+        let (placed, _) = place(&recorded.manifest, GROUP, &r, &elsewhere);
+        assert_eq!(placed[0].verdict, FindingVerdict::Violation);
     }
 
     /// A range means nothing across a reset: a hole in one era does not

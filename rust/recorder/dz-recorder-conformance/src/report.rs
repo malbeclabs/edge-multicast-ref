@@ -137,6 +137,17 @@ pub struct RuleOutcome {
     /// rule set stated no such need, and nothing is inferred from the silence.
     #[serde(default)]
     pub needs: Vec<NeededRole>,
+    /// The `Channel ID` the rule was decided on, stated beside the instance and
+    /// in place of one. A rule decided over state every path of a channel fills
+    /// — the book, the snapshot groups, the reference data — names no instance,
+    /// because no single publisher is its subject; it names the channel and the
+    /// port role instead, and its row is placed at channel grain above this
+    /// module.
+    #[serde(default)]
+    pub channel_id: Option<u8>,
+    /// The port role the rule's evidence arrived on.
+    #[serde(default)]
+    pub port_role: Option<NeededRole>,
 }
 
 /// A port role, as a report names one.

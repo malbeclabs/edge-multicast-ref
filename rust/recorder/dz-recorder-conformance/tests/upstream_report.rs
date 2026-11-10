@@ -36,8 +36,17 @@ fn the_rule_sets_own_placed_report_parses_as_the_declared_shape() {
 
     // Rules decided over state every path of a channel fills are placed on no
     // instance, and say so by omission rather than by a guess.
-    let unplaced = report.rules.iter().filter(|r| r.instance.is_none()).count();
-    assert_eq!(unplaced, 5);
+    let unplaced: Vec<_> = report
+        .rules
+        .iter()
+        .filter(|r| r.instance.is_none())
+        .collect();
+    assert_eq!(unplaced.len(), 5);
+    // They name the channel and the port role instead, which is what places
+    // them at channel grain.
+    assert!(unplaced
+        .iter()
+        .all(|r| r.channel_id.is_some() && r.port_role.is_some()));
 
     // No entry states the roles it reads beyond its own instance yet.
     assert!(report.rules.iter().all(|r| r.needs.is_empty()));
