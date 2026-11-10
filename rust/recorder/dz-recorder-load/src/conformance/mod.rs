@@ -21,6 +21,7 @@
 
 pub mod findings;
 pub mod judge;
+pub mod ledger;
 pub mod rows;
 #[cfg(test)]
 pub(crate) mod testing;
