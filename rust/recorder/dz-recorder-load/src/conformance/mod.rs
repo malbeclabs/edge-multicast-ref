@@ -47,16 +47,20 @@ pub enum ConformanceRefusal {
     /// A channel-grain verdict whose port could not be resolved to one the
     /// recorder joined for the role it states.
     ChannelUnresolved,
+    /// A verdict about a path the rule set stopped tracking at its address
+    /// cap, so it cannot be placed on one.
+    Overflow,
 }
 
 impl ConformanceRefusal {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::ToolCouldNotRun,
         Self::VersionUnresolvable,
         Self::VersionDisagrees,
         Self::NoInstance,
         Self::UndescribedInstance,
         Self::ChannelUnresolved,
+        Self::Overflow,
     ];
 
     #[must_use]
@@ -68,6 +72,7 @@ impl ConformanceRefusal {
             Self::NoInstance => "no_instance",
             Self::UndescribedInstance => "undescribed_instance",
             Self::ChannelUnresolved => "channel_unresolved",
+            Self::Overflow => "overflow",
         }
     }
 }

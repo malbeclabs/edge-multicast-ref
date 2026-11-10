@@ -147,6 +147,20 @@ pub enum ConfigError {
     )]
     ToolMissing { feed: String, path: PathBuf },
     #[error(
+        "[[conformance]] `{feed}`: tool `{path}` is not an absolute path. A bare name is looked \
+         up on PATH when it is run, which is the search this key exists to forbid, and a relative \
+         one depends on the directory the loader was started in"
+    )]
+    ToolNotAbsolute { feed: String, path: PathBuf },
+    #[error("[[conformance]] `{feed}`: tool `{path}` is not executable")]
+    ToolNotExecutable { feed: String, path: PathBuf },
+    #[error(
+        "[[conformance]] `{feed}`: rule_set_version `{version}` names no commit. That is what an \
+         unstamped build answers, every unstamped build answers it alike, and verdicts filed \
+         under it cannot be told apart"
+    )]
+    RuleSetVersionUnstamped { feed: String, version: String },
+    #[error(
         "[[conformance]] `{0}`: rule_set_version is required — the version the tool must answer \
          with. It is checked against the tool, never stamped on a row in its place"
     )]
@@ -197,6 +211,100 @@ pub struct LoaderConfig {
     /// The feeds the conformance runner judges. Off, and off by absence.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conformance: Vec<ConformanceFeed>,
+}
+
+impl ConformanceFeed {
+    /// The tool's path, resolved: absolute, every link followed, and an
+    /// executable file. What the runner executes, so that the file checked here
+    /// is the file that runs.
+    ///
+    /// # Errors
+    ///
+    /// The path is empty, relative, missing, not a file or not executable.
+    pub fn resolved_tool(&self) -> Result<PathBuf, ConfigError> {
+        if self.tool.as_os_str().is_empty() {
+            return Err(ConfigError::NoTool(self.feed.clone()));
+        }
+        if !self.tool.is_absolute() {
+            return Err(ConfigError::ToolNotAbsolute {
+                feed: self.feed.clone(),
+                path: self.tool.clone(),
+            });
+        }
+        let missing = || ConfigError::ToolMissing {
+            feed: self.feed.clone(),
+            path: self.tool.clone(),
+        };
+        let resolved = std::fs::canonicalize(&self.tool).map_err(|_| missing())?;
+        let meta = std::fs::metadata(&resolved).map_err(|_| missing())?;
+        if !meta.is_file() {
+            return Err(missing());
+        }
+        if !is_executable(&meta) {
+            return Err(ConfigError::ToolNotExecutable {
+                feed: self.feed.clone(),
+                path: resolved,
+            });
+        }
+        Ok(resolved)
+    }
+}
+
+#[cfg(unix)]
+fn is_executable(meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    meta.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn is_executable(_meta: &std::fs::Metadata) -> bool {
+    true
+}
+
+/// Where a path leads, for comparing two of them.
+///
+/// Made absolute against the working directory, its longest existing ancestor
+/// resolved through every link, and the rest — which does not exist yet —
+/// appended with `.` and `..` folded. Two spellings of one file compare equal,
+/// and a path that reaches into a directory through a link is seen to be in it.
+fn destination(path: &std::path::Path) -> PathBuf {
+    use std::path::Component;
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(path)
+    };
+    let mut folded = PathBuf::new();
+    for part in absolute.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                folded.pop();
+            }
+            other => folded.push(other.as_os_str()),
+        }
+    }
+    let mut existing = folded.clone();
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if let Ok(resolved) = std::fs::canonicalize(&existing) {
+            let mut out = resolved;
+            for part in rest.iter().rev() {
+                out.push(part);
+            }
+            return out;
+        }
+        match (
+            existing.file_name().map(ToOwned::to_owned),
+            existing.parent(),
+        ) {
+            (Some(name), Some(parent)) => {
+                rest.push(name);
+                existing = parent.to_path_buf();
+            }
+            _ => return folded,
+        }
+    }
 }
 
 /// One feed the specification's rule set is run over.
@@ -486,17 +594,15 @@ impl LoaderConfig {
             if judged.rule_set_feed.trim().is_empty() {
                 return Err(ConfigError::NoRuleSetFeed(judged.feed.clone()));
             }
-            if judged.tool.as_os_str().is_empty() {
-                return Err(ConfigError::NoTool(judged.feed.clone()));
-            }
-            if !judged.tool.is_file() {
-                return Err(ConfigError::ToolMissing {
-                    feed: judged.feed.clone(),
-                    path: judged.tool.clone(),
-                });
-            }
+            judged.resolved_tool()?;
             if judged.rule_set_version.trim().is_empty() {
                 return Err(ConfigError::NoRuleSetVersion(judged.feed.clone()));
+            }
+            if !dz_recorder_conformance::is_stamped(&judged.rule_set_version) {
+                return Err(ConfigError::RuleSetVersionUnstamped {
+                    feed: judged.feed.clone(),
+                    version: judged.rule_set_version.clone(),
+                });
             }
         }
         if self.conformance.is_empty() {
@@ -514,14 +620,17 @@ impl LoaderConfig {
             .as_ref()
             .filter(|p| !p.as_os_str().is_empty())
             .ok_or(ConfigError::NoConformanceScratch)?;
-        if ledger == &self.loader.ledger {
+        // Where each path leads, not how it is spelled: `a/../a/ledger.jsonl`
+        // is `a/ledger.jsonl`, and a link into the objects directory is in it.
+        if destination(ledger) == destination(&self.loader.ledger) {
             return Err(ConfigError::ConformanceLedgerIsTheLoadLedger);
         }
+        let objects = destination(&self.loader.objects_dir);
         for (key, path) in [
             ("conformance_ledger", ledger),
             ("conformance_scratch", scratch),
         ] {
-            if path.starts_with(&self.loader.objects_dir) {
+            if destination(path).starts_with(&objects) {
                 return Err(ConfigError::ConformancePathInObjects {
                     key,
                     path: path.clone(),
@@ -1162,6 +1271,7 @@ persist_snapshot_levels = true
         std::fs::create_dir_all(&objects).expect("objects");
         let tool = dir.join("dz-conformance");
         std::fs::write(&tool, "#!/bin/sh\n").expect("a stand-in tool");
+        set_mode(&tool, 0o755);
         let text = VALID
             .replace("OBJECTS", &objects.display().to_string())
             .replace(
@@ -1323,5 +1433,102 @@ persist_snapshot_levels = true
         ));
         config.loader.feeds = Some(vec!["top-of-book".to_owned()]);
         config.check().expect("named in the scan set");
+    }
+
+    fn set_mode(path: &std::path::Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("chmod");
+    }
+
+    /// A bare or relative tool path passes a file check against the working
+    /// directory and is then looked up on PATH when run, so a different binary
+    /// can run from the one that was checked. Refused; and the path the runner
+    /// is handed is the resolved one.
+    #[test]
+    fn a_tool_path_must_be_absolute_and_executable_and_is_run_as_resolved() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let (mut config, _) = judging(dir.path(), "");
+        let cwd = std::env::current_dir().expect("a working directory");
+        let local = cwd.join("target-dz-conformance-test-stand-in");
+        std::fs::write(&local, "#!/bin/sh\n").expect("a file in the working directory");
+        set_mode(&local, 0o755);
+        config.conformance[0].tool = PathBuf::from("target-dz-conformance-test-stand-in");
+        let refused = config.check();
+        let _ = std::fs::remove_file(&local);
+        assert!(
+            matches!(refused, Err(ConfigError::ToolNotAbsolute { .. })),
+            "{refused:?}"
+        );
+
+        let (config, _) = judging(dir.path(), "");
+        set_mode(&config.conformance[0].tool, 0o644);
+        assert!(matches!(
+            config.check(),
+            Err(ConfigError::ToolNotExecutable { .. })
+        ));
+
+        // Reached through a link and a `..`: what runs is the file itself.
+        let (mut config, _) = judging(dir.path(), "");
+        let real = config.conformance[0].tool.clone();
+        let link = dir.path().join("linked-tool");
+        std::os::unix::fs::symlink(&real, &link).expect("a link");
+        config.conformance[0].tool = dir.path().join("objects").join("..").join("linked-tool");
+        config.check().expect("valid");
+        assert_eq!(
+            config.conformance[0].resolved_tool().expect("resolved"),
+            std::fs::canonicalize(&real).expect("canonical")
+        );
+    }
+
+    /// An unstamped build answers `dev+none`, as does every other; a pin to it
+    /// would let unrelated builds write under one version.
+    #[test]
+    fn an_unstamped_rule_set_version_is_refused() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        for unstamped in ["dev+none", "0.4.2+none", "0.4.2+", "0.4.2"] {
+            let (mut config, _) = judging(dir.path(), "");
+            config.conformance[0].rule_set_version = unstamped.to_owned();
+            assert!(
+                matches!(
+                    config.check(),
+                    Err(ConfigError::RuleSetVersionUnstamped { .. })
+                ),
+                "{unstamped}"
+            );
+        }
+    }
+
+    /// Two spellings of one file are one file, and a link into the objects
+    /// directory is inside it.
+    #[test]
+    fn the_runners_paths_are_compared_by_where_they_lead() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let (mut config, _) = judging(dir.path(), "");
+        let ledger = dir.path().join("state").join("ledger.jsonl");
+        std::fs::create_dir_all(ledger.parent().expect("a parent")).expect("state");
+        config.loader.ledger = ledger;
+        config.loader.conformance_ledger = Some(
+            dir.path()
+                .join("state")
+                .join("..")
+                .join("state")
+                .join("ledger.jsonl"),
+        );
+        assert!(matches!(
+            config.check(),
+            Err(ConfigError::ConformanceLedgerIsTheLoadLedger)
+        ));
+
+        let (mut config, _) = judging(dir.path(), "");
+        let link = dir.path().join("looks-elsewhere");
+        std::os::unix::fs::symlink(&config.loader.objects_dir, &link).expect("a link");
+        config.loader.conformance_scratch = Some(link.join("scratch"));
+        assert!(matches!(
+            config.check(),
+            Err(ConfigError::ConformancePathInObjects {
+                key: "conformance_scratch",
+                ..
+            })
+        ));
     }
 }

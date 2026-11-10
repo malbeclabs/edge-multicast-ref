@@ -184,6 +184,15 @@ pub enum ToolError {
         configured: String,
         reported: String,
     },
+    /// The tool answered with a version that names no commit: `dev+none`, or
+    /// any answer whose commit half is empty or `none`. That is the answer of a
+    /// build nobody stamped, and every such build answers the same — so two
+    /// unrelated rule sets would write their verdicts under one version.
+    #[error(
+        "{tool} answers `{version}`, which names no commit: an unstamped build's verdicts \
+         cannot be attributed to a rule set"
+    )]
+    VersionUnstamped { tool: String, version: String },
     /// The report names a feed other than the one the tool was invoked for.
     /// The same shape as [`ToolError::VersionDisagrees`] and for the same
     /// reason: a finding filed under the wrong name is a finding about
@@ -433,6 +442,21 @@ impl RuleSet for ConformanceTool {
     }
 }
 
+/// Whether a `version+commit` answer names a commit.
+///
+/// `false` for `dev+none`, for an answer with no `+`, and for any whose commit
+/// half is empty or `none` — the shapes an unstamped build answers with.
+#[must_use]
+pub fn is_stamped(version: &str) -> bool {
+    match version.trim().split_once('+') {
+        Some((_, commit)) => {
+            let commit = commit.trim();
+            !commit.is_empty() && !commit.eq_ignore_ascii_case("none")
+        }
+        None => false,
+    }
+}
+
 /// A rule set that has said which rule set it is, and agreed with the
 /// configuration.
 ///
@@ -455,6 +479,14 @@ impl<R: RuleSet> PinnedRuleSet<R> {
     /// comparison this table exists to make.
     pub fn resolve(rule_set: R, configured: &str) -> Result<Self, ToolError> {
         let reported = rule_set.rule_set_version()?;
+        // Before the comparison: a configuration that also says `dev+none`
+        // agrees with the tool and proves nothing.
+        if !is_stamped(&reported) {
+            return Err(ToolError::VersionUnstamped {
+                tool: rule_set.describe(),
+                version: reported,
+            });
+        }
         if reported != configured {
             return Err(ToolError::VersionDisagrees {
                 tool: rule_set.describe(),

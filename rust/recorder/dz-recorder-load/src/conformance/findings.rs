@@ -9,14 +9,14 @@
 //! from the same object in the same pass, so a verdict never depends on the
 //! order objects were loaded in.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv4Addr;
 
 use dz_edge_core::{DatagramHeader, PortRole};
 use dz_recorder_archive::{InstanceCoverage, SegmentManifest};
 use dz_recorder_conformance::{EvidenceRange, Outcome, RuleOutcome, RuleSetReport};
 use dz_recorder_core::{CaptureDropScope, ChannelInstance, RecordedDatagram};
-use dz_recorder_loss::{LossDeriver, LossReport, SequenceRun};
+use dz_recorder_loss::{DeriverLimits, LossDeriver, LossReport, SequenceRun};
 use dz_recorder_rows::FindingVerdict;
 
 /// Why a stretch of one instance's sequence space is not evidence.
@@ -50,6 +50,9 @@ pub struct Hole {
     /// The wire `Reset Count`, which is what an evidence range states its era
     /// by. A range means nothing across a reset.
     pub reset_count: u8,
+    /// The era's ordinal on the instance, counting from 1, where the loss
+    /// derivation assigned one. A truncated datagram states none.
+    pub era: Option<u64>,
     pub first: u64,
     pub last: u64,
     pub cause: HoleCause,
@@ -67,10 +70,30 @@ impl Hole {
     }
 }
 
+/// Whether a hole and a range are in one era, where both say which.
+///
+/// The `Reset Count` is a `u8` and wraps, so two eras 256 resets apart share it;
+/// an era ordinal does not wrap, and where the range and the hole both state
+/// one, they must agree. Where either does not, the `Reset Count` alone decides,
+/// which can only match more holes and never fewer.
+fn same_era(hole: Option<u64>, evidence: Option<u64>) -> bool {
+    match (hole, evidence) {
+        (Some(h), Some(e)) => h == e,
+        _ => true,
+    }
+}
+
 /// This object's own holes, per instance.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Holes {
     by_instance: BTreeMap<ChannelInstance, Vec<Hole>>,
+    /// Instances whose loss derivation hit a bound — eras or delivered ranges
+    /// refused — so the runs reported for them are an under-count, and a
+    /// stretch with no reported hole may still be one.
+    incomplete: BTreeSet<ChannelInstance>,
+    /// The derivation refused whole instances, so which ones it did not track
+    /// cannot be said: every instance in the object is in doubt.
+    incomplete_object: bool,
 }
 
 impl Holes {
@@ -80,6 +103,7 @@ impl Holes {
             run.instance,
             Hole {
                 reset_count: run.reset_count,
+                era: Some(run.era_ordinal),
                 first: run.missing_from,
                 last: run.missing_to,
                 cause: HoleCause::Missing,
@@ -93,6 +117,7 @@ impl Holes {
             instance,
             Hole {
                 reset_count,
+                era: None,
                 first: seq,
                 last: seq,
                 cause: HoleCause::Truncated,
@@ -125,7 +150,9 @@ impl Holes {
                 HoleCause::Missing => h.last.saturating_add(1),
                 HoleCause::Truncated => h.last,
             };
-            h.reset_count == evidence.reset_count && evidence.overlaps(h.first, reach)
+            h.reset_count == evidence.reset_count
+                && same_era(h.era, evidence.era_index)
+                && evidence.overlaps(h.first, reach)
         })
     }
 
@@ -159,7 +186,46 @@ impl Holes {
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.by_instance.is_empty()
+        self.by_instance.is_empty() && self.incomplete.is_empty() && !self.incomplete_object
+    }
+
+    /// Marks `instance` as one whose holes are not all known.
+    pub fn incomplete(&mut self, instance: ChannelInstance) {
+        self.incomplete.insert(instance);
+    }
+
+    /// Marks every instance in the object as one whose holes are not all known.
+    pub fn incomplete_everywhere(&mut self) {
+        self.incomplete_object = true;
+    }
+
+    /// Why the loss coverage of `instance` cannot be vouched for, if it cannot.
+    #[must_use]
+    pub fn coverage_gap(&self, instance: &ChannelInstance) -> Option<&'static str> {
+        if self.incomplete_object {
+            Some(
+                "the loss derivation refused whole instances in this object, so its holes are not \
+                 all known",
+            )
+        } else if self.incomplete.contains(instance) {
+            Some(
+                "the loss derivation hit its bound on this instance, so its holes are not all known",
+            )
+        } else {
+            None
+        }
+    }
+
+    /// The same, for any path of one channel and port.
+    #[must_use]
+    pub fn channel_coverage_gap(&self, channel_id: u8, dst_port: u16) -> Option<&'static str> {
+        if self.incomplete_object {
+            return self.coverage_gap(&ChannelInstance::new(CHANNEL_SOURCE, channel_id, dst_port));
+        }
+        self.incomplete
+            .iter()
+            .find(|i| i.channel_id == channel_id && i.dst_port == dst_port)
+            .and_then(|i| self.coverage_gap(i))
     }
 }
 
@@ -178,8 +244,15 @@ pub struct HoleFinder {
 impl HoleFinder {
     #[must_use]
     pub fn new(scope: CaptureDropScope) -> Self {
+        Self::with_limits(scope, DeriverLimits::default())
+    }
+
+    /// The same, under stated bounds. The bounds are the loss derivation's own;
+    /// stating them is for a test that needs to reach one.
+    #[must_use]
+    pub fn with_limits(scope: CaptureDropScope, limits: DeriverLimits) -> Self {
         Self {
-            loss: LossDeriver::new(scope),
+            loss: LossDeriver::with_limits(scope, limits),
             holes: Holes::default(),
         }
     }
@@ -205,7 +278,58 @@ impl HoleFinder {
         for run in report.runs() {
             holes.missing(run);
         }
+        // The runs are exhaustive only where the derivation tracked everything.
+        // A bound it hit is a stretch it did not look at, and a stretch nobody
+        // looked at is not a stretch with no hole in it.
+        for loss in report.instances() {
+            if loss.eras_refused > 0 || loss.ranges_refused > 0 {
+                holes.incomplete(loss.instance);
+            }
+        }
+        if report.instances_refused() > 0 {
+            holes.incomplete_everywhere();
+        }
         holes
+    }
+}
+
+/// What arrived, per multicast group, in this object.
+///
+/// Per group and not per object: two groups can be joined on the same port,
+/// and the rule set is run over one group's datagrams at a time. A port that
+/// carried something in another group carried nothing in the file this group's
+/// rule set read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Carried {
+    ports: BTreeSet<(Ipv4Addr, u16)>,
+    channels: BTreeSet<(Ipv4Addr, u8, u16)>,
+}
+
+impl Carried {
+    pub fn observe(&mut self, dg: &RecordedDatagram<'_>) {
+        let group = *dg.dst.ip();
+        let port = dg.dst.port();
+        self.ports.insert((group, port));
+        if let Ok(header) = DatagramHeader::peek(dg.payload) {
+            self.channels.insert((group, header.channel_id, port));
+        }
+    }
+
+    /// States that `port` carried `channel_id` in `group`, for a test that has
+    /// no archive to observe.
+    pub fn mark(&mut self, group: Ipv4Addr, channel_id: u8, port: u16) {
+        self.ports.insert((group, port));
+        self.channels.insert((group, channel_id, port));
+    }
+
+    #[must_use]
+    pub fn port(&self, group: Ipv4Addr, port: u16) -> bool {
+        self.ports.contains(&(group, port))
+    }
+
+    #[must_use]
+    pub fn channel(&self, group: Ipv4Addr, channel_id: u8, port: u16) -> bool {
+        self.channels.contains(&(group, channel_id, port))
     }
 }
 
@@ -274,19 +398,23 @@ impl Unrun {
 ///
 /// Two cases with one verdict and two code paths, and only one of them is
 /// obvious. A role nobody joined produces no data; a role joined on a port that
-/// received nothing produces no data either, and it is the manifest's
-/// `instances` map that tells it from a clean one. A port that carried nothing
-/// looks exactly like a clean feed to the rule set, whose exit code cannot say
-/// it looked at nothing.
+/// received nothing produces no data either, and it is what arrived *in this
+/// group* that tells it from a clean one. A port that carried nothing looks
+/// exactly like a clean feed to the rule set, whose exit code cannot say it
+/// looked at nothing.
 #[must_use]
-pub fn unrun(manifest: &SegmentManifest, group: Ipv4Addr, entry: &RuleOutcome) -> Option<Unrun> {
+pub fn unrun(
+    manifest: &SegmentManifest,
+    group: Ipv4Addr,
+    entry: &RuleOutcome,
+    carried: &Carried,
+) -> Option<Unrun> {
     entry.needs.iter().find_map(|needed| {
         let role = PortRole::from(*needed);
         let Some(port) = joined_port(manifest, group, role) else {
             return Some(Unrun::NotJoined(role));
         };
-        let carried = manifest.instances.keys().any(|i| i.dst_port == port);
-        (!carried).then_some(Unrun::Silent(role, port))
+        (!carried.port(group, port)).then_some(Unrun::Silent(role, port))
     })
 }
 
@@ -306,6 +434,10 @@ pub struct Refused {
     /// the recorder joined, in this group, for the role the rule stated — or
     /// whose channel never appeared on it. Without a port there is no row key.
     pub channel_unresolved: u64,
+    /// The rule set stopped tracking source addresses for the channel at its
+    /// cap, so the path the finding is about cannot be named. Never a channel
+    /// row: the finding is about one path, unknown, and not about every path.
+    pub overflow: u64,
     /// `no_instance`, by rule. The rule id is the rule set's, carried through
     /// opaquely; nothing here knows what any of them mean.
     pub no_instance_by_rule: BTreeMap<String, u64>,
@@ -316,6 +448,7 @@ impl Refused {
         self.no_instance += other.no_instance;
         self.undescribed_instance += other.undescribed_instance;
         self.channel_unresolved += other.channel_unresolved;
+        self.overflow += other.overflow;
         for (rule, n) in &other.no_instance_by_rule {
             *self.no_instance_by_rule.entry(rule.clone()).or_default() += n;
         }
@@ -323,7 +456,7 @@ impl Refused {
 
     #[must_use]
     pub const fn total(&self) -> u64 {
-        self.no_instance + self.undescribed_instance + self.channel_unresolved
+        self.no_instance + self.undescribed_instance + self.channel_unresolved + self.overflow
     }
 }
 
@@ -383,6 +516,7 @@ pub fn place<'a>(
     group: Ipv4Addr,
     report: &'a RuleSetReport,
     holes: &Holes,
+    carried: &Carried,
 ) -> (Vec<Placed<'a>>, Refused) {
     let mut placed = Vec::with_capacity(report.rules.len());
     let mut refused = Refused::default();
@@ -399,6 +533,10 @@ pub fn place<'a>(
                 };
                 (instance, Subject::Instance, role, Some(coverage))
             }
+            None if entry.overflow => {
+                refused.overflow += 1;
+                continue;
+            }
             None => {
                 let Some(channel_id) = entry.channel_id else {
                     refused.no_instance += 1;
@@ -408,7 +546,8 @@ pub fn place<'a>(
                         .or_default() += 1;
                     continue;
                 };
-                let Some((dst_port, role)) = channel_port(manifest, group, channel_id, entry)
+                let Some((dst_port, role)) =
+                    channel_port(manifest, group, channel_id, entry, carried)
                 else {
                     refused.channel_unresolved += 1;
                     continue;
@@ -421,7 +560,7 @@ pub fn place<'a>(
                 )
             }
         };
-        let (verdict, detail) = match unrun(manifest, group, entry) {
+        let (verdict, detail) = match unrun(manifest, group, entry, carried) {
             // Before the stated outcome, whatever it is: a rule that read a
             // role nothing arrived on judged nothing, and a verdict it stated
             // over that nothing is not one this table may carry.
@@ -456,6 +595,7 @@ fn channel_port(
     group: Ipv4Addr,
     channel_id: u8,
     entry: &RuleOutcome,
+    carried: &Carried,
 ) -> Option<(u16, PortRole)> {
     let role = PortRole::from(entry.port_role?);
     let mut ports: Vec<u16> = manifest
@@ -469,10 +609,8 @@ fn channel_port(
     let [port] = ports[..] else {
         return None;
     };
-    manifest
-        .instances
-        .keys()
-        .any(|i| i.channel_id == channel_id && i.dst_port == port)
+    carried
+        .channel(group, channel_id, port)
         .then_some((port, role))
 }
 
@@ -492,6 +630,12 @@ fn channel_downgraded(
     let verdict = stated(entry.outcome);
     if !matches!(verdict, FindingVerdict::Violation | FindingVerdict::Pass) {
         return (verdict, entry.detail.clone());
+    }
+    if let Some(why) = holes.channel_coverage_gap(channel.channel_id, channel.dst_port) {
+        return (
+            FindingVerdict::Unverifiable,
+            with_note(&entry.detail, &format!("unverifiable: {why}")),
+        );
     }
     match holes.first_on_channel(channel.channel_id, channel.dst_port) {
         Some((path, hole)) => (
@@ -536,6 +680,12 @@ fn downgraded(
     let verdict = stated(entry.outcome);
     if !matches!(verdict, FindingVerdict::Violation | FindingVerdict::Pass) {
         return (verdict, entry.detail.clone());
+    }
+    if let Some(why) = holes.coverage_gap(instance) {
+        return (
+            FindingVerdict::Unverifiable,
+            with_note(&entry.detail, &format!("unverifiable: {why}")),
+        );
     }
     let hole = match &entry.evidence {
         Some(evidence) => holes.overlapping(instance, evidence).map(|hole| {
@@ -589,7 +739,7 @@ pub(crate) mod tests {
 
     pub const GROUP: Ipv4Addr = Ipv4Addr::new(233, 252, 0, 10);
     pub const OTHER_GROUP: Ipv4Addr = Ipv4Addr::new(233, 252, 0, 11);
-    pub const SOURCE: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 10);
+    pub const SOURCE_IP: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 10);
     pub const MKTDATA: u16 = 40_000;
     pub const SNAPSHOT: u16 = 40_002;
 
@@ -635,7 +785,7 @@ pub(crate) mod tests {
             sha256: "b".repeat(64),
             instances: instances
                 .iter()
-                .map(|(port, c)| (ChannelInstance::new(SOURCE, 1, *port), c.clone()))
+                .map(|(port, c)| (ChannelInstance::new(SOURCE_IP, 1, *port), c.clone()))
                 .collect::<BTreeMap<_, _>>(),
             short_datagrams: 0,
             instances_dropped: 0,
@@ -648,17 +798,27 @@ pub(crate) mod tests {
         }
     }
 
+    /// What a manifest's instances say arrived, all of it in [`GROUP`].
+    pub fn carried(m: &SegmentManifest) -> Carried {
+        let mut c = Carried::default();
+        for i in m.instances.keys() {
+            c.mark(GROUP, i.channel_id, i.dst_port);
+        }
+        c
+    }
+
     pub fn entry(rule_id: &str, outcome: Outcome, port: Option<u16>) -> RuleOutcome {
         RuleOutcome {
             rule_id: rule_id.to_owned(),
             outcome,
             instance: port.map(|dst_port| ReportInstance {
-                source: SOURCE,
+                source_addr: SOURCE_IP,
                 channel_id: 1,
                 dst_port,
             }),
             evidence: Some(EvidenceRange {
                 reset_count: 0,
+                era_index: None,
                 first_seq: 3,
                 last_seq: 4,
             }),
@@ -666,6 +826,7 @@ pub(crate) mod tests {
             needs: Vec::new(),
             channel_id: None,
             port_role: None,
+            overflow: false,
         }
     }
 
@@ -674,6 +835,7 @@ pub(crate) mod tests {
             report_format: dz_recorder_conformance::report::REPORT_FORMAT,
             feed: "mbp".to_owned(),
             rules,
+            unplaced_findings: 0,
         }
     }
 
@@ -698,7 +860,7 @@ pub(crate) mod tests {
             entry("TEST.STRUCTURE", Outcome::Pass, Some(MKTDATA)),
             entry("TEST.OTHER", Outcome::Violation, Some(MKTDATA)),
         ]);
-        let (placed, refused) = place(&m, GROUP, &r, &Holes::default());
+        let (placed, refused) = place(&m, GROUP, &r, &Holes::default(), &carried(&m));
         assert_eq!(refused, Refused::default());
         let verdicts: Vec<_> = placed
             .iter()
@@ -745,15 +907,15 @@ pub(crate) mod tests {
         )]);
         let e = &r.rules[0];
         assert_eq!(
-            unrun(&never, GROUP, e),
+            unrun(&never, GROUP, e, &carried(&never)),
             Some(Unrun::NotJoined(PortRole::Snapshot))
         );
         assert_eq!(
-            unrun(&silent, GROUP, e),
+            unrun(&silent, GROUP, e, &carried(&silent)),
             Some(Unrun::Silent(PortRole::Snapshot, SNAPSHOT))
         );
-        let (a, _) = place(&never, GROUP, &r, &Holes::default());
-        let (b, _) = place(&silent, GROUP, &r, &Holes::default());
+        let (a, _) = place(&never, GROUP, &r, &Holes::default(), &carried(&never));
+        let (b, _) = place(&silent, GROUP, &r, &Holes::default(), &carried(&silent));
         assert_eq!(a[0].verdict, FindingVerdict::Na);
         assert_eq!(b[0].verdict, FindingVerdict::Na);
         assert_ne!(a[0].detail, b[0].detail, "same verdict, different reasons");
@@ -764,7 +926,7 @@ pub(crate) mod tests {
             silent.roles_joined.clone(),
             &[(MKTDATA, coverage(0, 99)), (SNAPSHOT, coverage(0, 9))],
         );
-        let (c, _) = place(&carrying, GROUP, &r, &Holes::default());
+        let (c, _) = place(&carrying, GROUP, &r, &Holes::default(), &carried(&carrying));
         assert_eq!(c[0].verdict, FindingVerdict::Pass);
     }
 
@@ -783,7 +945,7 @@ pub(crate) mod tests {
             NeededRole::Snapshot,
         )]);
         assert_eq!(
-            unrun(&m, GROUP, &r.rules[0]),
+            unrun(&m, GROUP, &r.rules[0], &carried(&m)),
             Some(Unrun::NotJoined(PortRole::Snapshot))
         );
     }
@@ -800,7 +962,7 @@ pub(crate) mod tests {
             entry("TEST.ANCHORED", Outcome::Violation, Some(MKTDATA)),
             NeededRole::Snapshot,
         )]);
-        let (placed, _) = place(&m, GROUP, &r, &Holes::default());
+        let (placed, _) = place(&m, GROUP, &r, &Holes::default(), &carried(&m));
         assert_eq!(placed[0].verdict, FindingVerdict::Na);
         assert!(
             placed[0].detail.starts_with("TEST.ANCHORED said so ["),
@@ -822,7 +984,7 @@ pub(crate) mod tests {
             entry("TEST.ELSEWHERE", Outcome::Violation, Some(41_999)),
             entry("TEST.HERE", Outcome::Pass, Some(MKTDATA)),
         ]);
-        let (placed, refused) = place(&m, GROUP, &r, &Holes::default());
+        let (placed, refused) = place(&m, GROUP, &r, &Holes::default(), &carried(&m));
         assert_eq!(placed.len(), 1);
         assert_eq!(placed[0].entry.rule_id, "TEST.HERE");
         assert_eq!(refused.no_instance, 1);
@@ -842,7 +1004,7 @@ pub(crate) mod tests {
             &[(MKTDATA, coverage(0, 99))],
         );
         let r = report(vec![entry("TEST.HERE", Outcome::Pass, Some(MKTDATA))]);
-        let (placed, refused) = place(&m, GROUP, &r, &Holes::default());
+        let (placed, refused) = place(&m, GROUP, &r, &Holes::default(), &carried(&m));
         assert!(placed.is_empty());
         assert_eq!(refused.undescribed_instance, 1);
     }
@@ -859,7 +1021,7 @@ pub(crate) mod tests {
             entry("TEST.B", Outcome::Unverifiable, Some(MKTDATA)),
             entry("TEST.C", Outcome::Na, Some(MKTDATA)),
         ]);
-        let (placed, _) = place(&m, GROUP, &r, &Holes::default());
+        let (placed, _) = place(&m, GROUP, &r, &Holes::default(), &carried(&m));
         let v: Vec<_> = placed.iter().map(|p| p.verdict).collect();
         assert_eq!(
             v,
@@ -906,7 +1068,7 @@ pub(crate) mod tests {
             Some(1),
             Some(NeededRole::Snapshot),
         )]);
-        let (placed, refused) = place(&m, GROUP, &r, &Holes::default());
+        let (placed, refused) = place(&m, GROUP, &r, &Holes::default(), &carried(&m));
         assert_eq!(refused, Refused::default());
         assert_eq!(placed.len(), 1);
         let p = &placed[0];
@@ -938,7 +1100,7 @@ pub(crate) mod tests {
             // Neither an instance nor a channel: refused as before.
             channel_wide("TEST.D", Outcome::Pass, None, Some(NeededRole::Snapshot)),
         ]);
-        let (placed, refused) = place(&m, GROUP, &r, &Holes::default());
+        let (placed, refused) = place(&m, GROUP, &r, &Holes::default(), &carried(&m));
         assert!(placed.is_empty(), "{placed:?}");
         assert_eq!(refused.channel_unresolved, 3);
         assert_eq!(refused.no_instance, 1);
@@ -962,9 +1124,108 @@ pub(crate) mod tests {
             Some(1),
             Some(NeededRole::Snapshot),
         )]);
-        let (placed, refused) = place(&ambiguous, GROUP, &r, &Holes::default());
+        let (placed, refused) = place(
+            &ambiguous,
+            GROUP,
+            &r,
+            &Holes::default(),
+            &carried(&ambiguous),
+        );
         assert!(placed.is_empty());
         assert_eq!(refused.channel_unresolved, 1);
+    }
+
+    /// Two groups on the same snapshot port, and only the other group's
+    /// carried anything. The rule set ran over this group's file, which held
+    /// no snapshot datagram, so a rule that reads the snapshot role judged
+    /// nothing here — whatever arrived in the other group.
+    #[test]
+    fn a_role_that_carried_in_another_group_carried_nothing_in_this_one() {
+        let m = manifest(
+            vec![
+                joined(PortRole::Mktdata, GROUP, MKTDATA),
+                joined(PortRole::Snapshot, GROUP, SNAPSHOT),
+                joined(PortRole::Mktdata, OTHER_GROUP, MKTDATA),
+                joined(PortRole::Snapshot, OTHER_GROUP, SNAPSHOT),
+            ],
+            &[(MKTDATA, coverage(0, 99)), (SNAPSHOT, coverage(0, 9))],
+        );
+        let mut c = Carried::default();
+        c.mark(GROUP, 1, MKTDATA);
+        c.mark(OTHER_GROUP, 1, MKTDATA);
+        c.mark(OTHER_GROUP, 1, SNAPSHOT);
+        let r = report(vec![needing(
+            entry("TEST.ANCHORED", Outcome::Pass, Some(MKTDATA)),
+            NeededRole::Snapshot,
+        )]);
+        let (here, _) = place(&m, GROUP, &r, &Holes::default(), &c);
+        assert_eq!(here[0].verdict, FindingVerdict::Na);
+        assert!(
+            here[0].detail.contains("carried nothing"),
+            "{}",
+            here[0].detail
+        );
+        let (there, _) = place(&m, OTHER_GROUP, &r, &Holes::default(), &c);
+        assert_eq!(there[0].verdict, FindingVerdict::Pass);
+    }
+
+    /// An entry the rule set could not place because it stopped tracking
+    /// addresses is about one unknown path. It names a channel, and is still
+    /// never written as the channel's.
+    #[test]
+    fn an_overflow_entry_is_refused_and_never_a_channel_row() {
+        let m = both_roles();
+        let mut e = channel_wide(
+            "TEST.CHURN",
+            Outcome::Violation,
+            Some(1),
+            Some(NeededRole::Snapshot),
+        );
+        e.overflow = true;
+        let r = report(vec![e]);
+        let (placed, refused) = place(&m, GROUP, &r, &Holes::default(), &carried(&m));
+        assert!(placed.is_empty(), "{placed:?}");
+        assert_eq!(refused.overflow, 1);
+        assert_eq!(refused.channel_unresolved, 0);
+        assert_eq!(refused.no_instance, 0);
+    }
+
+    /// The `Reset Count` wraps; the era ordinal does not. A hole in the first
+    /// era and a range in an era 256 resets later share a `Reset Count`, and
+    /// only the ordinal tells them apart.
+    #[test]
+    fn an_era_ordinal_tells_apart_two_eras_that_share_a_reset_count() {
+        let instance = ChannelInstance::new(SOURCE_IP, 1, MKTDATA);
+        let mut holes = Holes::default();
+        holes.missing(&SequenceRun {
+            instance,
+            group: GROUP,
+            role: PortRole::Mktdata,
+            era_ordinal: 1,
+            reset_count: 0,
+            missing_from: 10,
+            missing_to: 12,
+            before_ts_ns: 0,
+            after_ts_ns: 0,
+        });
+        let at = |era_index| EvidenceRange {
+            reset_count: 0,
+            era_index,
+            first_seq: 11,
+            last_seq: 11,
+        };
+        assert!(
+            holes.overlapping(&instance, &at(Some(1))).is_some(),
+            "the same era"
+        );
+        assert!(
+            holes.overlapping(&instance, &at(Some(257))).is_none(),
+            "the same Reset Count, 256 resets later"
+        );
+        assert!(
+            holes.overlapping(&instance, &at(None)).is_some(),
+            "no ordinal stated: the Reset Count decides, and matches"
+        );
     }
 
     /// A role token the manifest spells some other way is not read as one.
@@ -998,12 +1259,13 @@ mod downgrade_tests {
             rule_id: "TEST.RULE".to_owned(),
             outcome,
             instance: Some(ReportInstance {
-                source: PRIMARY_SOURCE,
+                source_addr: PRIMARY_SOURCE,
                 channel_id: CHANNEL_ID,
                 dst_port: MKTDATA,
             }),
             evidence: evidence.map(|(reset_count, first_seq, last_seq)| EvidenceRange {
                 reset_count,
+                era_index: None,
                 first_seq,
                 last_seq,
             }),
@@ -1011,6 +1273,7 @@ mod downgrade_tests {
             needs: Vec::new(),
             channel_id: None,
             port_role: None,
+            overflow: false,
         }
     }
 
@@ -1020,7 +1283,7 @@ mod downgrade_tests {
         let (_dir, recorded) = record(publisher);
         let holes = recorded.holes();
         let r = report(vec![entry]);
-        let (placed, refused) = place(&recorded.manifest, GROUP, &r, &holes);
+        let (placed, refused) = place(&recorded.manifest, GROUP, &r, &holes, &recorded.carried());
         assert_eq!(
             refused,
             Refused::default(),
@@ -1096,7 +1359,7 @@ mod downgrade_tests {
             // a rule about an absence cites its evidence.
             stated(Outcome::Violation, Some((0, 290, 300))),
         ]);
-        let (placed, _) = place(&recorded.manifest, GROUP, &r, &holes);
+        let (placed, _) = place(&recorded.manifest, GROUP, &r, &holes, &recorded.carried());
         for p in &placed {
             assert_eq!(
                 p.verdict,
@@ -1118,7 +1381,7 @@ mod downgrade_tests {
             stated(Outcome::Violation, Some((0, 291, 300))),
             stated(Outcome::Violation, Some((0, 240, 249))),
         ]);
-        let (placed, _) = place(&recorded.manifest, GROUP, &r, &holes);
+        let (placed, _) = place(&recorded.manifest, GROUP, &r, &holes, &recorded.carried());
         assert!(placed
             .iter()
             .all(|p| p.verdict == FindingVerdict::Violation));
@@ -1146,6 +1409,7 @@ mod downgrade_tests {
         holes.truncated(instance, 0, 7);
         let at = |first_seq, last_seq| EvidenceRange {
             reset_count: 0,
+            era_index: None,
             first_seq,
             last_seq,
         };
@@ -1176,7 +1440,7 @@ mod downgrade_tests {
         let (_dir, recorded) = record(&starved);
         let holes = recorded.holes();
         let r = report(vec![channel_wide(Outcome::Violation, Some((0, 10, 12)))]);
-        let (placed, refused) = place(&recorded.manifest, GROUP, &r, &holes);
+        let (placed, refused) = place(&recorded.manifest, GROUP, &r, &holes, &recorded.carried());
         assert_eq!(refused, Refused::default());
         assert_eq!(placed[0].subject, Subject::Channel);
         assert_eq!(placed[0].instance.source, CHANNEL_SOURCE);
@@ -1204,6 +1468,7 @@ mod downgrade_tests {
                 &instance,
                 &EvidenceRange {
                     reset_count: 0,
+                    era_index: None,
                     first_seq: 10,
                     last_seq: 12
                 }
@@ -1212,7 +1477,7 @@ mod downgrade_tests {
 
         // A pass is held to the same rule; a clean channel keeps both.
         let r = report(vec![channel_wide(Outcome::Pass, None)]);
-        let (placed, _) = place(&recorded.manifest, GROUP, &r, &holes);
+        let (placed, _) = place(&recorded.manifest, GROUP, &r, &holes, &recorded.carried());
         assert_eq!(placed[0].verdict, FindingVerdict::Unverifiable);
         for outcome in [Outcome::Violation, Outcome::Pass] {
             let (verdict, _) = judged(
@@ -1246,7 +1511,7 @@ mod downgrade_tests {
         );
         let (_dir, recorded) = record(&SyntheticPublisher::clean(100));
         let r = report(vec![channel_wide(Outcome::Violation, None)]);
-        let (placed, _) = place(&recorded.manifest, GROUP, &r, &holes);
+        let (placed, _) = place(&recorded.manifest, GROUP, &r, &holes, &recorded.carried());
         assert_eq!(placed[0].verdict, FindingVerdict::Unverifiable);
         // And a hole on another channel or another port does not.
         let mut elsewhere = Holes::default();
@@ -1260,8 +1525,100 @@ mod downgrade_tests {
             0,
             5,
         );
-        let (placed, _) = place(&recorded.manifest, GROUP, &r, &elsewhere);
+        let (placed, _) = place(
+            &recorded.manifest,
+            GROUP,
+            &r,
+            &elsewhere,
+            &recorded.carried(),
+        );
         assert_eq!(placed[0].verdict, FindingVerdict::Violation);
+    }
+
+    /// Datagrams of one instance whose sequence numbers descend two at a time,
+    /// so every one opens a delivered range of its own.
+    fn descending(count: usize) -> Vec<dz_recorder_core::OwnedDatagram> {
+        let mut datagrams = SyntheticPublisher::clean(count).datagrams();
+        for (i, dg) in datagrams.iter_mut().enumerate() {
+            let seq = 1_000u64 - 2 * i as u64;
+            dg.payload[4..12].copy_from_slice(&seq.to_le_bytes());
+        }
+        datagrams
+    }
+
+    fn found_under(
+        limits: dz_recorder_loss::DeriverLimits,
+        datagrams: &[dz_recorder_core::OwnedDatagram],
+    ) -> Holes {
+        let mut finder = HoleFinder::with_limits(CaptureDropScope::PortRole, limits);
+        for dg in datagrams {
+            finder.observe(&dg.as_recorded());
+        }
+        finder.finish()
+    }
+
+    /// The loss derivation is bounded, and a bound it hits is a stretch it did
+    /// not look at. A violation on that instance — even one cited in an era no
+    /// reported hole is in — is not one the runner can stand behind, and nor is
+    /// a pass; the channel row over that instance's port is held to the same.
+    #[test]
+    fn a_loss_derivation_that_hit_its_bound_leaves_nothing_to_vouch_for() {
+        let datagrams = descending(30);
+        let limits = dz_recorder_loss::DeriverLimits {
+            max_ranges_per_era: 4,
+            ..dz_recorder_loss::DeriverLimits::default()
+        };
+        let holes = found_under(limits, &datagrams);
+        let instance = ChannelInstance::new(PRIMARY_SOURCE, CHANNEL_ID, MKTDATA);
+        assert!(holes.coverage_gap(&instance).is_some(), "the bound was hit");
+
+        let m = super::tests::manifest(
+            vec![super::tests::joined(PortRole::Mktdata, GROUP, MKTDATA)],
+            &[(MKTDATA, super::tests::coverage(0, 1_000))],
+        );
+        let c = super::tests::carried(&m);
+        let r = report(vec![
+            // In an era nothing was reported missing from.
+            stated(Outcome::Violation, Some((7, 10, 12))),
+            stated(Outcome::Pass, Some((7, 10, 12))),
+            channel_wide(Outcome::Violation, None),
+        ]);
+        let (placed, _) = place(&m, GROUP, &r, &holes, &c);
+        for p in &placed {
+            assert_eq!(p.verdict, FindingVerdict::Unverifiable, "{p:?}");
+            assert!(p.detail.contains("hit its bound"), "{}", p.detail);
+        }
+
+        // Under the default bounds the same feed is tracked whole.
+        let holes = found_under(dz_recorder_loss::DeriverLimits::default(), &datagrams);
+        assert!(holes.coverage_gap(&instance).is_none());
+        let (placed, _) = place(&m, GROUP, &r, &holes, &c);
+        assert_eq!(placed[0].verdict, FindingVerdict::Violation);
+    }
+
+    /// A derivation that refused whole instances cannot say which: every
+    /// verdict in the object is in doubt.
+    #[test]
+    fn a_loss_derivation_that_refused_instances_leaves_the_whole_object_in_doubt() {
+        let datagrams = SyntheticPublisher::clean(30).datagrams();
+        let limits = dz_recorder_loss::DeriverLimits {
+            max_instances: 0,
+            ..dz_recorder_loss::DeriverLimits::default()
+        };
+        let holes = found_under(limits, &datagrams);
+        let m = super::tests::manifest(
+            vec![super::tests::joined(PortRole::Mktdata, GROUP, MKTDATA)],
+            &[(MKTDATA, super::tests::coverage(0, 29))],
+        );
+        let r = report(vec![
+            stated(Outcome::Violation, Some((0, 10, 12))),
+            channel_wide(Outcome::Pass, None),
+        ]);
+        let (placed, _) = place(&m, GROUP, &r, &holes, &super::tests::carried(&m));
+        for p in &placed {
+            assert_eq!(p.verdict, FindingVerdict::Unverifiable, "{p:?}");
+            assert!(p.detail.contains("refused whole instances"), "{}", p.detail);
+        }
     }
 
     /// A range means nothing across a reset: a hole in one era does not
@@ -1343,6 +1700,7 @@ mod downgrade_tests {
                 &instance,
                 &EvidenceRange {
                     reset_count: 0,
+                    era_index: None,
                     first_seq: 7,
                     last_seq: 7,
                 },
@@ -1354,6 +1712,7 @@ mod downgrade_tests {
                 &instance,
                 &EvidenceRange {
                     reset_count: 0,
+                    era_index: None,
                     first_seq: 8,
                     last_seq: 19,
                 },

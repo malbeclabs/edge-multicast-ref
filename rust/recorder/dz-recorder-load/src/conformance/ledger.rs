@@ -21,11 +21,11 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum JudgeLedgerError {
-    #[error("conformance ledger {path}: {source}")]
+    #[error("conformance ledger {path}: {cause}")]
     Io {
         path: PathBuf,
         #[source]
-        source: std::io::Error,
+        cause: std::io::Error,
     },
 }
 
@@ -55,9 +55,9 @@ impl JudgeLedger {
     /// which the table makes a replace.
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, JudgeLedgerError> {
         let path = path.into();
-        let io = |source| JudgeLedgerError::Io {
+        let io = |cause| JudgeLedgerError::Io {
             path: path.clone(),
-            source,
+            cause,
         };
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
@@ -73,9 +73,22 @@ impl JudgeLedger {
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ledger),
-            Err(source) => return Err(io(source)),
+            Err(cause) => return Err(io(cause)),
         };
-        for entry in parse(&text) {
+        // A torn tail — the unfinished line a crash mid-append leaves — is cut
+        // off before anything is appended. Left in place, the next entry would
+        // be written onto the end of it, becoming one unparseable line, and the
+        // object it records would read as unjudged on the next open.
+        let whole = text.rfind('\n').map_or(0, |at| at + 1);
+        if whole < text.len() {
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .map_err(io)?;
+            file.set_len(whole as u64).map_err(io)?;
+            file.sync_all().map_err(io)?;
+        }
+        for entry in parse(&text[..whole]) {
             ledger.remember(&entry);
         }
         Ok(ledger)
@@ -125,9 +138,9 @@ impl JudgeLedger {
     /// have landed.
     pub fn record(&mut self, entry: JudgeEntry) -> Result<(), JudgeLedgerError> {
         if !self.path.as_os_str().is_empty() {
-            let io = |source| JudgeLedgerError::Io {
+            let io = |cause| JudgeLedgerError::Io {
                 path: self.path.clone(),
-                source,
+                cause,
             };
             let line = serde_json::to_string(&entry).map_err(|e| io(std::io::Error::other(e)))?;
             let mut file = std::fs::OpenOptions::new()
@@ -158,10 +171,10 @@ impl JudgeLedger {
         let text = match std::fs::read_to_string(&self.path) {
             Ok(text) => text,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(source) => {
+            Err(cause) => {
                 return Err(JudgeLedgerError::Io {
                     path: self.path.clone(),
-                    source,
+                    cause,
                 })
             }
         };
@@ -175,9 +188,9 @@ impl JudgeLedger {
             return Ok(());
         }
         let temp = self.path.with_extension("compacting");
-        let io = |source| JudgeLedgerError::Io {
+        let io = |cause| JudgeLedgerError::Io {
             path: temp.clone(),
-            source,
+            cause,
         };
         let mut file = std::fs::File::create(&temp).map_err(io)?;
         for entry in &kept {
@@ -186,9 +199,9 @@ impl JudgeLedger {
             file.write_all(b"\n").map_err(io)?;
         }
         file.sync_all().map_err(io)?;
-        std::fs::rename(&temp, &self.path).map_err(|source| JudgeLedgerError::Io {
+        std::fs::rename(&temp, &self.path).map_err(|cause| JudgeLedgerError::Io {
             path: self.path.clone(),
-            source,
+            cause,
         })?;
         self.judged.clear();
         self.objects.clear();
@@ -264,13 +277,28 @@ mod tests {
         let text = std::fs::read_to_string(&path).expect("readable");
         // A crash part way through appending b's line.
         std::fs::write(&path, &text[..text.len() - 20]).expect("torn");
-        let reopened = JudgeLedger::open(&path).expect("reopened");
+        let mut reopened = JudgeLedger::open(&path).expect("reopened");
         assert!(reopened.is_judged("a", "sha-a", "v1"));
         assert!(
             !reopened.is_judged("b", "sha-b", "v1"),
             "torn, so not judged"
         );
         assert_eq!(reopened.entries(), 1);
+
+        // Judged again and recorded: the entry must survive the next open,
+        // not be appended onto the torn fragment and lost with it.
+        reopened.record(entry("b", "v1")).expect("recorded");
+        let again = JudgeLedger::open(&path).expect("reopened again");
+        assert!(again.is_judged("a", "sha-a", "v1"));
+        assert!(
+            again.is_judged("b", "sha-b", "v1"),
+            "the re-judged entry is kept"
+        );
+        assert_eq!(again.entries(), 2);
+        assert!(std::fs::read_to_string(&path)
+            .expect("readable")
+            .lines()
+            .all(|l| serde_json::from_str::<JudgeEntry>(l).is_ok()));
     }
 
     #[test]

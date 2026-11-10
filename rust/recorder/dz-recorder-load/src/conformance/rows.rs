@@ -163,7 +163,7 @@ mod tests {
 
     use super::*;
     use crate::conformance::findings::tests::{
-        coverage, entry, joined, manifest, report, GROUP, MKTDATA, SNAPSHOT,
+        carried, coverage, entry, joined, manifest, report, GROUP, MKTDATA, SNAPSHOT,
     };
     use crate::conformance::findings::{place, Holes};
 
@@ -171,6 +171,7 @@ mod tests {
         let mut e = entry(rule, outcome, Some(port));
         e.evidence = Some(EvidenceRange {
             reset_count: 0,
+            era_index: None,
             first_seq: first,
             last_seq: last,
         });
@@ -186,7 +187,7 @@ mod tests {
             &[(MKTDATA, coverage(0, 99)), (SNAPSHOT, coverage(0, 9))],
         );
         let r = report(rules);
-        let (placed, _) = place(&m, GROUP, &r, &Holes::default());
+        let (placed, _) = place(&m, GROUP, &r, &Holes::default(), &carried(&m));
         finding_rows(
             &RunStamp {
                 manifest: &m,

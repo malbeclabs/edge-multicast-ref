@@ -110,11 +110,11 @@ enum Failure {
     Objects { failed: u64, first: String },
     #[error("{0}")]
     JudgeLedger(#[from] JudgeLedgerError),
-    #[error("conformance scratch {path}: {source}")]
+    #[error("conformance scratch {path}: {cause}")]
     Scratch {
         path: std::path::PathBuf,
         #[source]
-        source: std::io::Error,
+        cause: std::io::Error,
     },
     #[error("[[conformance]] `{feed}`: {detail}")]
     RuleSet { feed: String, detail: String },
@@ -202,8 +202,12 @@ fn run(args: &Args) -> Result<(), Failure> {
                 .conformance_scratch
                 .clone()
                 .unwrap_or_default();
+            let tool = judged.resolved_tool().map_err(|e| Failure::RuleSet {
+                feed: judged.feed.clone(),
+                detail: e.to_string(),
+            })?;
             let pinned = PinnedRuleSet::resolve(
-                ConformanceTool::new(&judged.tool, scratch),
+                ConformanceTool::new(tool, scratch),
                 &judged.rule_set_version,
             )
             .map_err(|e| Failure::RuleSet {
@@ -265,9 +269,9 @@ fn run(args: &Args) -> Result<(), Failure> {
             // A sink of its own over the same directory: it writes only the
             // findings file, which the load's sink never opens.
             let mut conformance = conformance_of(&config, true, || {
-                FileSink::create(dir).map_err(|source| Failure::DryRun {
+                FileSink::create(dir).map_err(|cause| Failure::DryRun {
                     path: dir.clone(),
-                    source,
+                    source: cause,
                 })
             })?;
             drive(
@@ -330,9 +334,9 @@ fn conformance_of<S>(
         .conformance_scratch
         .clone()
         .unwrap_or_default();
-    std::fs::create_dir_all(&scratch).map_err(|source| Failure::Scratch {
+    std::fs::create_dir_all(&scratch).map_err(|cause| Failure::Scratch {
         path: scratch.clone(),
-        source,
+        cause,
     })?;
     let ledger = if dry_run {
         JudgeLedger::in_memory()
@@ -346,16 +350,24 @@ fn conformance_of<S>(
         );
         ledger
     };
+    // The resolved path, so the file `check` looked at is the file that runs:
+    // a bare name handed to the process launcher is looked up on PATH.
     let feeds = config
         .conformance
         .iter()
-        .map(|c| JudgedFeed {
-            feed: c.feed.clone(),
-            rule_set_feed: c.rule_set_feed.clone(),
-            rule_set_version: c.rule_set_version.clone(),
-            rule_set: ConformanceTool::new(&c.tool, &scratch),
+        .map(|c| {
+            let tool = c.resolved_tool().map_err(|e| Failure::RuleSet {
+                feed: c.feed.clone(),
+                detail: e.to_string(),
+            })?;
+            Ok(JudgedFeed {
+                feed: c.feed.clone(),
+                rule_set_feed: c.rule_set_feed.clone(),
+                rule_set_version: c.rule_set_version.clone(),
+                rule_set: ConformanceTool::new(tool, &scratch),
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, Failure>>()?;
     Ok(Some(Conformance {
         feeds,
         scratch,
@@ -528,7 +540,9 @@ fn drive<S: RowSink, C: RowSink>(
             Ok(landed) => {
                 metrics.bytes_posted(landed.bytes_posted);
                 let mut errors = Vec::new();
-                let recorded = record_judged(
+                // Every entry that could not be written is in `errors`, and is
+                // counted as a failure below, one per message.
+                let (recorded, _) = record_judged(
                     &landed.objects,
                     &mut c.held,
                     &mut c.ledger,

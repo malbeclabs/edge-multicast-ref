@@ -5,18 +5,20 @@
   "commit": "abc123def456",
   "read_error": "",
   "capture_drops": 0,
+  "unplaced_findings": 0,
   "rules": [
     {
       "rule_id": "FRAME.LENGTH_CONSISTENCY",
       "outcome": "violation",
       "severity": "must",
       "instance": {
-        "source": "127.0.0.1",
+        "source_addr": "127.0.0.1",
         "channel_id": 0,
         "dst_port": 51000
       },
       "evidence": {
         "reset_count": 2,
+        "era_index": 1,
         "first_seq": 4514,
         "last_seq": 4601
       },
@@ -30,12 +32,13 @@
       "outcome": "violation",
       "severity": "must",
       "instance": {
-        "source": "127.0.0.1",
+        "source_addr": "127.0.0.1",
         "channel_id": 0,
         "dst_port": 51000
       },
       "evidence": {
         "reset_count": 2,
+        "era_index": 1,
         "first_seq": 4613,
         "last_seq": 4710
       },
@@ -49,12 +52,13 @@
       "outcome": "violation",
       "severity": "must",
       "instance": {
-        "source": "127.0.0.1",
+        "source_addr": "127.0.0.1",
         "channel_id": 0,
         "dst_port": 51000
       },
       "evidence": {
         "reset_count": 2,
+        "era_index": 1,
         "first_seq": 4724,
         "last_seq": 4785
       },
@@ -68,12 +72,13 @@
       "outcome": "violation",
       "severity": "must",
       "instance": {
-        "source": "127.0.0.1",
+        "source_addr": "127.0.0.1",
         "channel_id": 0,
         "dst_port": 51000
       },
       "evidence": {
         "reset_count": 2,
+        "era_index": 1,
         "first_seq": 4798,
         "last_seq": 5000
       },
@@ -87,12 +92,13 @@
       "outcome": "violation",
       "severity": "must",
       "instance": {
-        "source": "127.0.0.1",
+        "source_addr": "127.0.0.1",
         "channel_id": 0,
         "dst_port": 51000
       },
       "evidence": {
         "reset_count": 2,
+        "era_index": 1,
         "first_seq": 5038,
         "last_seq": 5125
       },
@@ -106,12 +112,13 @@
       "outcome": "violation",
       "severity": "must",
       "instance": {
-        "source": "127.0.0.1",
+        "source_addr": "127.0.0.1",
         "channel_id": 0,
         "dst_port": 51000
       },
       "evidence": {
         "reset_count": 2,
+        "era_index": 1,
         "first_seq": 5137,
         "last_seq": 5216
       },
@@ -125,12 +132,13 @@
       "outcome": "violation",
       "severity": "info",
       "instance": {
-        "source": "127.0.0.1",
+        "source_addr": "127.0.0.1",
         "channel_id": 0,
         "dst_port": 31000
       },
       "evidence": {
         "reset_count": 2,
+        "era_index": 1,
         "first_seq": 6663,
         "last_seq": 7941
       },
@@ -144,12 +152,13 @@
       "outcome": "violation",
       "severity": "info",
       "instance": {
-        "source": "127.0.0.1",
+        "source_addr": "127.0.0.1",
         "channel_id": 0,
         "dst_port": 41000
       },
       "evidence": {
         "reset_count": 2,
+        "era_index": 1,
         "first_seq": 48,
         "last_seq": 53
       },
@@ -163,12 +172,13 @@
       "outcome": "violation",
       "severity": "info",
       "instance": {
-        "source": "127.0.0.1",
+        "source_addr": "127.0.0.1",
         "channel_id": 0,
         "dst_port": 51000
       },
       "evidence": {
         "reset_count": 2,
+        "era_index": 1,
         "first_seq": 4501,
         "last_seq": 5216
       },
@@ -230,12 +240,13 @@
       "outcome": "violation",
       "severity": "must",
       "instance": {
-        "source": "127.0.0.1",
+        "source_addr": "127.0.0.1",
         "channel_id": 0,
         "dst_port": 41000
       },
       "evidence": {
         "reset_count": 2,
+        "era_index": 1,
         "first_seq": 48,
         "last_seq": 53
       },

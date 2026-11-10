@@ -19,10 +19,13 @@ use std::path::{Path, PathBuf};
 use dz_recorder_conformance::{PinnedRuleSet, RuleSet, ToolError};
 use dz_recorder_rows::{ObjectId, RowSink};
 
+use super::findings::Refused;
 use super::judge::{judge_object, JudgeInput};
 use super::ledger::{JudgeEntry, JudgeLedger};
 use super::ConformanceRefusal;
-use crate::loader::{now_unix_nanos, now_unix_seconds, oldest_age, read_manifest_if_present};
+use crate::loader::{
+    now_unix_nanos, now_unix_seconds, oldest_age, read_manifest_if_present, take_turns,
+};
 use crate::metrics::{ErrorKind, LoaderMetrics};
 
 const MANIFEST_SUFFIX: &str = ".manifest.json";
@@ -79,48 +82,69 @@ struct Candidate {
     start_ns: u64,
 }
 
+/// One object a pass may judge.
+struct Work {
+    feed_index: usize,
+    object: PathBuf,
+    start_ns: u64,
+    manifest: dz_recorder_archive::SegmentManifest,
+    id: ObjectId,
+}
+
 impl<S: RowSink, R: RuleSet + Clone> Judge<'_, S, R> {
     /// Walks every judged feed once. Never returns an error for an object:
-    /// every failure is counted, named in the returned messages and left
-    /// unjudged.
+    /// every failure is counted in `failed`, named in the returned messages and
+    /// left unjudged.
     pub fn run_once(&mut self, stop: &dyn Fn() -> bool) -> (JudgePass, Vec<String>) {
         let mut pass = JudgePass::default();
         let mut errors = Vec::new();
         let mut present: HashSet<(String, String)> = HashSet::new();
         let mut unjudged: Vec<(ObjectId, u64)> = Vec::new();
         let mut complete = true;
-        let mut budget_spent = false;
 
+        // 1. Which rule set each feed is judged by this pass. Asked every pass,
+        //    so a binary replaced under a running loader is caught at the next
+        //    pass rather than stamped on a month of rows. A feed whose rule set
+        //    cannot be pinned is a failure of the pass, not of an object.
+        let mut pinned: Vec<Option<PinnedRuleSet<R>>> = Vec::with_capacity(self.feeds.len());
         for judged_feed in self.feeds {
-            // Asked every pass, so a binary replaced under a running loader is
-            // caught at the next pass rather than stamped on a month of rows.
-            let pinned = match PinnedRuleSet::resolve(
+            match PinnedRuleSet::resolve(
                 judged_feed.rule_set.clone(),
                 &judged_feed.rule_set_version,
             ) {
-                Ok(pinned) => Some(pinned),
+                Ok(p) => pinned.push(Some(p)),
                 Err(e) => {
                     let reason = match e {
                         ToolError::VersionDisagrees { .. } => ConformanceRefusal::VersionDisagrees,
                         _ => ConformanceRefusal::VersionUnresolvable,
                     };
                     self.metrics.conformance_refused(reason, 1);
+                    pass.failed += 1;
                     errors.push(format!("conformance {}: {e}", judged_feed.feed));
-                    None
+                    pinned.push(None);
                 }
-            };
+            }
+        }
 
+        // 2. The scan, over every feed and every object, whole: the lag it
+        //    publishes is the whole backlog, not the part a bounded pass reached.
+        let mut work: Vec<Work> = Vec::new();
+        for (feed_index, judged_feed) in self.feeds.iter().enumerate() {
             let (candidates, read_whole) =
                 self.candidates(&self.objects_dir.join(&judged_feed.feed), &mut errors);
-            complete &= read_whole;
-            let mut tool_failed = false;
+            if !read_whole {
+                complete = false;
+                pass.failed += 1;
+            }
             for candidate in candidates {
                 let manifest = match read_manifest_if_present(&candidate.manifest_path) {
                     Ok(Some(manifest)) => manifest,
+                    // Evicted between the listing and the read.
                     Ok(None) => continue,
                     Err(message) => {
                         self.metrics.error(ErrorKind::Manifest, now_unix_seconds());
                         errors.push(message);
+                        pass.failed += 1;
                         complete = false;
                         continue;
                     }
@@ -140,82 +164,99 @@ impl<S: RowSink, R: RuleSet + Clone> Judge<'_, S, R> {
                     continue;
                 }
                 unjudged.push((id.clone(), manifest.end_ns));
-                if self.held.iter().any(|h| h.id == id) {
+                if self.held.iter().any(|h| h.id == id) || pinned[feed_index].is_none() {
                     continue;
                 }
-                let Some(pinned) = pinned.as_ref() else {
-                    continue;
-                };
-                if tool_failed || budget_spent || stop() {
-                    continue;
-                }
-                if self.max_objects != 0 && pass.judged + pass.failed >= self.max_objects as u64 {
-                    budget_spent = true;
-                    continue;
-                }
-
-                let judged = judge_object(&JudgeInput {
-                    object: &candidate.object,
-                    manifest: &manifest,
-                    rule_set: pinned,
-                    rule_set_feed: &judged_feed.rule_set_feed,
-                    scratch: self.scratch,
-                    run_ts: now_unix_nanos(),
+                work.push(Work {
+                    feed_index,
+                    object: candidate.object,
+                    start_ns: candidate.start_ns,
+                    manifest,
+                    id,
                 });
-                let judged = match judged {
-                    Ok(judged) => judged,
-                    Err(e) => {
-                        pass.failed += 1;
-                        if e.is_tool() {
-                            // The binary, not the object: every later object
-                            // of this feed would fail the same way, so the
-                            // feed waits for the next pass.
-                            self.metrics
-                                .conformance_refused(ConformanceRefusal::ToolCouldNotRun, 1);
-                            tool_failed = true;
-                        } else {
-                            self.metrics.error(ErrorKind::Replay, now_unix_seconds());
-                        }
-                        errors.push(format!("conformance {}: {e}", judged_feed.feed));
-                        continue;
-                    }
-                };
-                self.metrics.conformance_refused(
-                    ConformanceRefusal::NoInstance,
-                    judged.refused.no_instance,
-                );
-                self.metrics.conformance_refused(
-                    ConformanceRefusal::UndescribedInstance,
-                    judged.refused.undescribed_instance,
-                );
-                self.metrics.conformance_refused(
-                    ConformanceRefusal::ChannelUnresolved,
-                    judged.refused.channel_unresolved,
-                );
-                for (rule, count) in &judged.refused.no_instance_by_rule {
-                    self.metrics.conformance_unplaced(rule, *count);
-                }
+            }
+        }
 
-                match self.sink.write_batch(judged.batch, now_unix_nanos()) {
-                    Ok(accepted) => {
-                        pass.judged += 1;
-                        self.metrics.bytes_posted(accepted.bytes_posted);
-                        self.held.push(HeldJudgement {
-                            id,
-                            feed: judged_feed.feed.clone(),
-                            rule_set_version: pinned.version().to_owned(),
-                        });
-                        pass.recorded += self.record_landed(&accepted.landed, &mut errors);
+        // 3. Oldest first within a feed, the feeds taking turns: one feed's
+        //    backlog never holds another's objects back until they are evicted.
+        //    The same order the load takes.
+        work.sort_by(|a, b| (a.start_ns, &a.object).cmp(&(b.start_ns, &b.object)));
+        let order = take_turns(
+            work.iter()
+                .enumerate()
+                .map(|(i, w)| (i, self.feeds[w.feed_index].feed.clone()))
+                .collect(),
+        );
+        let mut tool_failed = vec![false; self.feeds.len()];
+        let mut attempted = 0usize;
+        for index in order {
+            if stop() {
+                break;
+            }
+            // Against the objects attempted, which is the work done; a feed
+            // whose rule set could not be pinned took none of it.
+            if self.max_objects != 0 && attempted >= self.max_objects {
+                break;
+            }
+            let w = &work[index];
+            if tool_failed[w.feed_index] {
+                continue;
+            }
+            let (Some(pinned), Some(judged_feed)) =
+                (pinned[w.feed_index].as_ref(), self.feeds.get(w.feed_index))
+            else {
+                continue;
+            };
+            attempted += 1;
+            let judged = match judge_object(&JudgeInput {
+                object: &w.object,
+                manifest: &w.manifest,
+                rule_set: pinned,
+                rule_set_feed: &judged_feed.rule_set_feed,
+                scratch: self.scratch,
+                run_ts: now_unix_nanos(),
+            }) {
+                Ok(judged) => judged,
+                Err(e) => {
+                    pass.failed += 1;
+                    if e.is_tool() {
+                        // The binary, not the object: every later object of
+                        // this feed would fail the same way, so the feed waits
+                        // for the next pass.
+                        self.metrics
+                            .conformance_refused(ConformanceRefusal::ToolCouldNotRun, 1);
+                        tool_failed[w.feed_index] = true;
+                    } else {
+                        self.metrics.error(ErrorKind::Replay, now_unix_seconds());
                     }
-                    Err(e) => {
-                        // The sink lost what it held: none of it is judged.
-                        self.held.clear();
-                        self.metrics.batch_failed();
-                        self.metrics.error(ErrorKind::Sink, now_unix_seconds());
-                        pass.failed += 1;
-                        errors.push(format!("conformance sink: {e}"));
-                        budget_spent = true;
-                    }
+                    errors.push(format!("conformance {}: {e}", judged_feed.feed));
+                    continue;
+                }
+            };
+            self.count_refusals(&judged.refused);
+
+            match self.sink.write_batch(judged.batch, now_unix_nanos()) {
+                Ok(accepted) => {
+                    pass.judged += 1;
+                    self.metrics.bytes_posted(accepted.bytes_posted);
+                    self.held.push(HeldJudgement {
+                        id: w.id.clone(),
+                        feed: judged_feed.feed.clone(),
+                        rule_set_version: pinned.version().to_owned(),
+                    });
+                    let (recorded, failed) = self.record_landed(&accepted.landed, &mut errors);
+                    pass.recorded += recorded;
+                    pass.failed += failed;
+                }
+                Err(e) => {
+                    // The sink lost what it held: none of it is judged, and
+                    // nothing more goes to it this pass.
+                    self.held.clear();
+                    self.metrics.batch_failed();
+                    self.metrics.error(ErrorKind::Sink, now_unix_seconds());
+                    pass.failed += 1;
+                    errors.push(format!("conformance sink: {e}"));
+                    break;
                 }
             }
         }
@@ -223,7 +264,9 @@ impl<S: RowSink, R: RuleSet + Clone> Judge<'_, S, R> {
         match self.sink.post_if_due(now_unix_nanos()) {
             Ok(landed) => {
                 self.metrics.bytes_posted(landed.bytes_posted);
-                pass.recorded += self.record_landed(&landed.objects, &mut errors);
+                let (recorded, failed) = self.record_landed(&landed.objects, &mut errors);
+                pass.recorded += recorded;
+                pass.failed += failed;
             }
             Err(e) => {
                 self.held.clear();
@@ -243,7 +286,9 @@ impl<S: RowSink, R: RuleSet + Clone> Judge<'_, S, R> {
         pass.oldest_unjudged_age_seconds = oldest_age(still.into_iter(), now_unix_seconds());
 
         // Only against a complete enumeration, as the load ledger is: a feed
-        // that could not be read this pass must not lose its entries.
+        // that could not be read this pass must not lose its entries. Not a
+        // failure when it does not happen: the ledger is still correct, only
+        // longer than it needs to be.
         if complete {
             let scope: HashSet<String> = self.feeds.iter().map(|f| f.feed.clone()).collect();
             if let Err(e) = self.ledger.compact(&present, &scope) {
@@ -256,9 +301,29 @@ impl<S: RowSink, R: RuleSet + Clone> Judge<'_, S, R> {
         (pass, errors)
     }
 
+    fn count_refusals(&self, refused: &Refused) {
+        for (reason, count) in [
+            (ConformanceRefusal::NoInstance, refused.no_instance),
+            (
+                ConformanceRefusal::UndescribedInstance,
+                refused.undescribed_instance,
+            ),
+            (
+                ConformanceRefusal::ChannelUnresolved,
+                refused.channel_unresolved,
+            ),
+            (ConformanceRefusal::Overflow, refused.overflow),
+        ] {
+            self.metrics.conformance_refused(reason, count);
+        }
+        for (rule, count) in &refused.no_instance_by_rule {
+            self.metrics.conformance_unplaced(rule, *count);
+        }
+    }
+
     /// Writes a ledger entry for every held object whose findings landed.
-    /// Returns how many were recorded.
-    pub fn record_landed(&mut self, landed: &[ObjectId], errors: &mut Vec<String>) -> u64 {
+    /// Returns how many were recorded and how many could not be.
+    pub fn record_landed(&mut self, landed: &[ObjectId], errors: &mut Vec<String>) -> (u64, u64) {
         record_judged(landed, self.held, self.ledger, self.metrics, errors)
     }
 
@@ -315,16 +380,23 @@ impl<S: RowSink, R: RuleSet + Clone> Judge<'_, S, R> {
     }
 }
 
-/// Records every held judgement whose findings are in `landed`. Shared with
-/// the flush on the way out, which has no pass to call it from.
+/// Records every held judgement whose findings are in `landed`, returning how
+/// many were recorded and how many could not be. Shared with the flush on the
+/// way out, which has no pass to call it from.
+///
+/// An entry that could not be written is a failure: the findings are in the
+/// store and the runner has forgotten it put them there, so the object is
+/// judged again — which the table makes a replace, and which is still work the
+/// operator was told was done.
 pub fn record_judged(
     landed: &[ObjectId],
     held: &mut Vec<HeldJudgement>,
     ledger: &mut JudgeLedger,
     metrics: &LoaderMetrics,
     errors: &mut Vec<String>,
-) -> u64 {
+) -> (u64, u64) {
     let mut recorded = 0;
+    let mut failed = 0;
     for id in landed {
         let Some(at) = held.iter().position(|h| &h.id == id) else {
             continue;
@@ -342,12 +414,13 @@ pub fn record_judged(
                 metrics.conformance_judged();
             }
             Err(e) => {
+                failed += 1;
                 metrics.error(ErrorKind::Ledger, now_unix_seconds());
                 errors.push(e.to_string());
             }
         }
     }
-    recorded
+    (recorded, failed)
 }
 
 #[cfg(test)]
@@ -374,6 +447,7 @@ mod tests {
         record_segments(
             dir.path(),
             &completed.join(FEED),
+            FEED,
             &SyntheticPublisher::clean(100),
             objects,
         );
@@ -533,6 +607,10 @@ mod tests {
         feeds[0].rule_set_version = "v0+configured".to_owned();
         let (pass, errors) = judge_pass(&host, &rows, &feeds, &mut ledger, &metrics, 0);
         assert_eq!(pass.judged, 0);
+        assert_eq!(
+            pass.failed, 1,
+            "a pass that judged nothing it was asked to is a failed one"
+        );
         assert_eq!(pass.unjudged, 2);
         assert!(pass.oldest_unjudged_age_seconds > 0);
         assert!(errors[0].contains("v0+configured"), "{errors:?}");
@@ -607,5 +685,61 @@ mod tests {
         assert!(text.contains(
             "dz_loader_conformance_refused_total{reason=\"no_instance\",recorder=\"recorder-1\",site=\"site-1\"} 1"
         ));
+    }
+
+    /// A manifest that cannot be read, and a judgement that cannot be written
+    /// to the ledger, are failures of the pass: `--once` must not exit clean
+    /// over work it did not do or could not persist.
+    #[test]
+    fn a_manifest_it_cannot_read_and_a_ledger_it_cannot_write_are_failures() {
+        let host = host(1);
+        let metrics = LoaderMetrics::new(SITE, RECORDER);
+        let rows = host.dir.path().join("rows");
+        let dir = host.completed.join(FEED);
+        std::fs::write(dir.join("1-2-9.manifest.json"), "not json").expect("a bad manifest");
+        std::fs::write(dir.join("1-2-9.pcapng.zst"), "").expect("its object");
+
+        let ledger_path = host.dir.path().join("judged.jsonl");
+        let mut ledger = JudgeLedger::open(&ledger_path).expect("ledger");
+        // The ledger's file becomes something nothing can be appended to.
+        std::fs::create_dir_all(&ledger_path).expect("a directory where the file was");
+
+        let (pass, errors) = judge_pass(&host, &rows, &feed(clean()), &mut ledger, &metrics, 0);
+        assert_eq!(pass.judged, 1, "the readable object was judged");
+        assert_eq!(pass.recorded, 0, "and could not be recorded");
+        assert_eq!(pass.failed, 2, "one manifest, one ledger entry: {errors:?}");
+    }
+
+    /// Two feeds and a budget of two: each feed gets a turn, oldest first
+    /// within it, however deep the first feed's backlog. The second feed's
+    /// objects sort after all of the first's, so a pass that simply walked
+    /// them in order would spend the whole budget on the first.
+    #[test]
+    fn the_feeds_take_turns_within_the_budget() {
+        let host = host(3);
+        record_segments(
+            host.dir.path(),
+            &host.completed.join("zz-sorted-last"),
+            "zz-sorted-last",
+            &SyntheticPublisher::clean(100),
+            1,
+        );
+        let metrics = LoaderMetrics::new(SITE, RECORDER);
+        let rows = host.dir.path().join("rows");
+        let mut ledger = JudgeLedger::in_memory();
+        let mut feeds = feed(clean());
+        feeds.push(JudgedFeed {
+            feed: "zz-sorted-last".to_owned(),
+            rule_set_feed: "tob".to_owned(),
+            rule_set_version: VERSION.to_owned(),
+            rule_set: clean(),
+        });
+        let first_runs = std::rc::Rc::clone(&feeds[0].rule_set.runs);
+        let second_runs = std::rc::Rc::clone(&feeds[1].rule_set.runs);
+        let (pass, _) = judge_pass(&host, &rows, &feeds, &mut ledger, &metrics, 2);
+        assert_eq!(pass.judged, 2);
+        assert_eq!(first_runs.borrow().len(), 1, "one turn for the deep feed");
+        assert_eq!(second_runs.borrow().len(), 1, "and one for the other");
+        assert_eq!(pass.unjudged, 2, "the rest wait, and are counted");
     }
 }

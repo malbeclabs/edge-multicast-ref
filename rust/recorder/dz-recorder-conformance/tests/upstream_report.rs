@@ -1,7 +1,8 @@
 //! The placed report as the rule set itself writes it.
 //!
 //! `fixtures/report-upstream-mbp.json` is the rule set's own golden for its
-//! `-rule-report` output, copied unaltered. The fixtures beside it are the shape
+//! `-rule-report` output, copied unaltered from edge-feed-spec at
+//! b9ff080b4019b48c48e021728b9d842d18bb1439. The fixtures beside it are the shape
 //! this repository asked for; this one is the shape that arrived, and the test
 //! is that the two are the same interface: every entry parses, the fields the
 //! rule set adds beyond the ask are tolerated rather than refused, and an entry
@@ -50,4 +51,14 @@ fn the_rule_sets_own_placed_report_parses_as_the_declared_shape() {
 
     // No entry states the roles it reads beyond its own instance yet.
     assert!(report.rules.iter().all(|r| r.needs.is_empty()));
+
+    // Every cited range states its era by an ordinal that does not wrap, beside
+    // the Reset Count that does; nothing here overflowed the address cap.
+    assert!(report
+        .rules
+        .iter()
+        .filter_map(|r| r.evidence)
+        .all(|e| e.era_index.is_some()));
+    assert!(report.rules.iter().all(|r| !r.overflow));
+    assert_eq!(report.unplaced_findings, 0);
 }

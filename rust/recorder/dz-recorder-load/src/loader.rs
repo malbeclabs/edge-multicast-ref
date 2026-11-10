@@ -1001,7 +1001,7 @@ pub fn record_landed(
 /// switches use, rather than on the subdirectory: a recorder configured
 /// without a spec writes loose objects at the top level, and their feed is
 /// knowable only from the manifest.
-fn take_turns(derivable: Vec<(usize, String)>) -> Vec<usize> {
+pub(crate) fn take_turns(derivable: Vec<(usize, String)>) -> Vec<usize> {
     let mut taken: HashMap<String, usize> = HashMap::new();
     let mut ranked: Vec<(usize, usize)> = derivable
         .into_iter()

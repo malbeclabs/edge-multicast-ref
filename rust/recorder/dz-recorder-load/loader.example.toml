@@ -137,12 +137,16 @@ max_objects_per_pass = 60
 # the spec name above.
 # rule_set_feed = "mbp"
 #
-# The binary. Required, with no default and no PATH search: a runner that found
-# one would stamp its verdicts with whatever rule set happened to be installed.
+# The binary. Required, absolute and executable, with no default and no PATH
+# search: a runner that found one would stamp its verdicts with whatever rule set
+# happened to be installed. Links are resolved, and the resolved file is what
+# runs.
 # tool = "/opt/dz-conformance/bin/dz-conformance"
 #
 # What the binary must answer --version with. Asked every pass; a binary that
-# answers anything else judges nothing, and --check says which.
+# answers anything else judges nothing, and --check says which. An answer that
+# names no commit (dev+none, x+none, x+) is refused: every unstamped build gives
+# it alike.
 # rule_set_version = "v0.5.0+0123456789ab"
 
 [clickhouse]

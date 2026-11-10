@@ -23,7 +23,7 @@ use dz_recorder_rows::derive::verify_digest;
 use dz_recorder_rows::{DeriveError, RowBatch};
 use thiserror::Error;
 
-use super::findings::{place, role_named, HoleFinder, Refused};
+use super::findings::{place, role_named, Carried, HoleFinder, Refused};
 use super::rows::{finding_rows, RunStamp};
 
 #[derive(Debug, Error)]
@@ -31,11 +31,11 @@ pub enum JudgeError {
     /// The object's bytes are not the ones its manifest describes.
     #[error("{0}")]
     Digest(DeriveError),
-    #[error("{path}: {source}")]
+    #[error("{path}: {cause}")]
     Open {
         path: PathBuf,
         #[source]
-        source: SourceError,
+        cause: SourceError,
     },
     #[error(
         "{object_key}: the replay ended as {termination} rather than at the end of the archive, \
@@ -47,11 +47,11 @@ pub enum JudgeError {
         termination: String,
     },
     /// The archive's own section does not state what a re-write must carry.
-    #[error("{object_key}: {source}")]
+    #[error("{object_key}: {cause}")]
     Section {
         object_key: String,
         #[source]
-        source: BridgeError,
+        cause: BridgeError,
     },
     #[error(
         "{object_key}: the archive's section changed its claims part way through, and a \
@@ -72,23 +72,23 @@ pub enum JudgeError {
          three the specification names"
     )]
     UnknownRole { object_key: String, role: String },
-    #[error("scratch {path}: {source}")]
+    #[error("scratch {path}: {cause}")]
     Scratch {
         path: PathBuf,
         #[source]
-        source: std::io::Error,
+        cause: std::io::Error,
     },
-    #[error("{object_key}: re-writing the segment for the rule set: {source}")]
+    #[error("{object_key}: re-writing the segment for the rule set: {cause}")]
     Bridge {
         object_key: String,
         #[source]
-        source: BridgeError,
+        cause: BridgeError,
     },
-    #[error("{object_key}: {source}")]
+    #[error("{object_key}: {cause}")]
     Tool {
         object_key: String,
         #[source]
-        source: ToolError,
+        cause: ToolError,
     },
 }
 
@@ -139,14 +139,14 @@ pub fn judge_object<R: RuleSet>(input: &JudgeInput<'_, R>) -> Result<Judged, Jud
     verify_digest(input.object, manifest).map_err(JudgeError::Digest)?;
 
     // 2. Replayed to its end, under one section's claims, with its own holes
-    //    found in the same walk.
-    let mut source = ArchiveSource::open(input.object).map_err(|source| JudgeError::Open {
+    //    and what arrived in each group found in the same walk.
+    let mut archive = ArchiveSource::open(input.object).map_err(|cause| JudgeError::Open {
         path: input.object.to_path_buf(),
-        source,
+        cause,
     })?;
-    let provenance = SectionProvenance::of(&source).map_err(|source| JudgeError::Section {
+    let provenance = SectionProvenance::of(&archive).map_err(|cause| JudgeError::Section {
         object_key: key(),
-        source,
+        cause,
     })?;
     let scope = provenance.capture_drop_scope;
     if manifest.capture_drop_scope != scope.as_str() {
@@ -157,19 +157,26 @@ pub fn judge_object<R: RuleSet>(input: &JudgeInput<'_, R>) -> Result<Judged, Jud
         });
     }
     let mut holes = HoleFinder::new(scope);
+    let mut carried = Carried::default();
     let mut datagrams: Vec<OwnedDatagram> = Vec::new();
-    for dg in &mut source {
-        holes.observe(&dg.as_recorded());
+    while let Some(dg) = archive.next() {
+        // After every datagram and not only at the end: the reader takes up a
+        // later section's claims as it reaches it, and an archive whose
+        // sections went A, B, A would end looking like one section while B's
+        // datagrams were re-written under A's claims.
+        if SectionProvenance::of(&archive).ok().as_ref() != Some(&provenance) {
+            return Err(JudgeError::SectionChanged { object_key: key() });
+        }
+        let recorded = dg.as_recorded();
+        holes.observe(&recorded);
+        carried.observe(&recorded);
         datagrams.push(dg);
     }
-    if source.terminated_by() != Termination::Eof {
+    if archive.terminated_by() != Termination::Eof {
         return Err(JudgeError::Incomplete {
             object_key: key(),
-            termination: format!("{:?}", source.terminated_by()),
+            termination: format!("{:?}", archive.terminated_by()),
         });
-    }
-    if SectionProvenance::of(&source).ok().as_ref() != Some(&provenance) {
-        return Err(JudgeError::SectionChanged { object_key: key() });
     }
     let holes = holes.finish();
 
@@ -177,14 +184,14 @@ pub fn judge_object<R: RuleSet>(input: &JudgeInput<'_, R>) -> Result<Judged, Jud
     let dir = tempfile::Builder::new()
         .prefix("dz-judge-")
         .tempdir_in(input.scratch)
-        .map_err(|source| JudgeError::Scratch {
+        .map_err(|cause| JudgeError::Scratch {
             path: input.scratch.to_path_buf(),
-            source,
+            cause,
         })?;
-    let segments = write_group_segments(dir.path(), &datagrams, &provenance).map_err(|source| {
+    let segments = write_group_segments(dir.path(), &datagrams, &provenance).map_err(|cause| {
         JudgeError::Bridge {
             object_key: key(),
-            source,
+            cause,
         }
     })?;
     // The bytes are on disk now; the copy in memory is not needed for the runs.
@@ -203,26 +210,30 @@ pub fn judge_object<R: RuleSet>(input: &JudgeInput<'_, R>) -> Result<Judged, Jud
                 feed: input.rule_set_feed,
                 ports,
             })
-            .map_err(|source| JudgeError::Tool {
+            .map_err(|cause| JudgeError::Tool {
                 object_key: key(),
-                source,
+                cause,
             })?;
         reports.push((segment.group, report));
     }
 
-    // 5. Rows.
+    // 5. Rows, reduced once over every group: the table's key has no group in
+    //    it, so two groups' verdicts on one instance are one row, and the worst
+    //    of them is that row's verdict. Reduced per group, the engine would
+    //    keep whichever row it happened to merge last.
     let stamp = RunStamp {
         manifest,
         rule_set_version: input.rule_set.version(),
         run_ts: input.run_ts,
     };
     let mut refused = Refused::default();
-    let mut rows = Vec::new();
+    let mut placed = Vec::new();
     for (group, report) in &reports {
-        let (placed, r) = place(manifest, *group, report, &holes);
+        let (p, r) = place(manifest, *group, report, &holes, &carried);
         refused.add(&r);
-        rows.extend(finding_rows(&stamp, &placed));
+        placed.extend(p);
     }
+    let rows = finding_rows(&stamp, &placed);
     Ok(Judged {
         batch: RowBatch {
             object_key: manifest.object_key.clone(),
@@ -271,6 +282,8 @@ pub(crate) mod tests {
         /// Fails every run as the tool would when it could not start.
         pub broken: bool,
         pub runs: std::rc::Rc<RefCell<Vec<(Ipv4Addr, PortRoles)>>>,
+        /// A group's own report, in place of `rules`, where one is stated.
+        pub per_group: std::collections::BTreeMap<Ipv4Addr, Vec<RuleOutcome>>,
     }
 
     impl StubRuleSet {
@@ -280,6 +293,7 @@ pub(crate) mod tests {
                 rules,
                 broken: false,
                 runs: std::rc::Rc::default(),
+                per_group: std::collections::BTreeMap::new(),
             }
         }
     }
@@ -302,7 +316,12 @@ pub(crate) mod tests {
             Ok(RuleSetReport {
                 report_format: REPORT_FORMAT,
                 feed: invocation.feed.to_owned(),
-                rules: self.rules.clone(),
+                rules: self
+                    .per_group
+                    .get(&invocation.group)
+                    .unwrap_or(&self.rules)
+                    .clone(),
+                unplaced_findings: 0,
             })
         }
 
@@ -320,12 +339,13 @@ pub(crate) mod tests {
             rule_id: rule.to_owned(),
             outcome,
             instance: Some(ReportInstance {
-                source: PRIMARY_SOURCE,
+                source_addr: PRIMARY_SOURCE,
                 channel_id: CHANNEL_ID,
                 dst_port: port_for(PortRole::Mktdata),
             }),
             evidence: Some(EvidenceRange {
                 reset_count: 0,
+                era_index: None,
                 first_seq: first,
                 last_seq: last,
             }),
@@ -333,6 +353,7 @@ pub(crate) mod tests {
             needs: Vec::new(),
             channel_id: None,
             port_role: None,
+            overflow: false,
         }
     }
 
@@ -517,6 +538,105 @@ pub(crate) mod tests {
         .expect("judged")
         .batch
         .conformance_finding
+    }
+
+    /// The table's key has no group in it. One instance judged in two groups —
+    /// passing in one, violating in the other — is one row, and it is the
+    /// violation: reduced per group, two rows with one key would reach the
+    /// engine and it would keep whichever it merged last.
+    #[test]
+    fn one_instance_judged_in_two_groups_is_one_row_with_the_worst_verdict() {
+        use dz_recorder_archive::writer::RoleJoin;
+        use dz_recorder_replay::synthetic::GROUP;
+        const OTHER_GROUP: Ipv4Addr = Ipv4Addr::new(233, 252, 0, 11);
+        let mut datagrams = SyntheticPublisher::clean(20).datagrams();
+        let mut copies = datagrams.clone();
+        for dg in &mut copies {
+            dg.dst = std::net::SocketAddrV4::new(OTHER_GROUP, dg.dst.port());
+            dg.recv_ts_ns += 1;
+        }
+        datagrams.extend(copies);
+        datagrams.sort_by_key(|dg| dg.recv_ts_ns);
+        let port = port_for(PortRole::Mktdata);
+        let (_dir, recorded) = crate::conformance::testing::record_datagrams(
+            &datagrams,
+            vec![
+                RoleJoin::on(PortRole::Mktdata, GROUP, port),
+                RoleJoin::on(PortRole::Mktdata, OTHER_GROUP, port),
+            ],
+        );
+        let scratch = tempfile::tempdir().expect("scratch");
+        let mut stub = StubRuleSet::stating(Vec::new());
+        stub.per_group
+            .insert(GROUP, vec![on_mktdata("TEST.ONE", Outcome::Pass, 0, 19)]);
+        stub.per_group.insert(
+            OTHER_GROUP,
+            vec![on_mktdata("TEST.ONE", Outcome::Violation, 4, 5)],
+        );
+        let runs = std::rc::Rc::clone(&stub.runs);
+        let rows = judge(&recorded, stub, scratch.path())
+            .expect("judged")
+            .batch
+            .conformance_finding;
+        assert_eq!(runs.borrow().len(), 2, "one run per group");
+        assert_eq!(rows.len(), 1, "{rows:#?}");
+        assert_eq!(rows[0].verdict, FindingVerdict::Violation);
+        assert_eq!((rows[0].first_seq, rows[0].last_seq), (4, 5));
+    }
+
+    /// An archive whose sections go A, B, A ends looking like A. Checked only
+    /// at the end, B's datagrams would be re-written under A's claims; checked
+    /// as the replay goes, the object is refused.
+    #[test]
+    fn a_section_that_changes_part_way_is_refused_even_if_it_changes_back() {
+        use dz_recorder_conformance::write_segment;
+        let (dir, base) = record(&SyntheticPublisher::clean(30));
+        let datagrams = SyntheticPublisher::clean(30).datagrams();
+        let a = SectionProvenance {
+            identity: crate::conformance::testing::identity(),
+            link_headers: dz_recorder_archive::writer::LinkHeaders::Synthesised,
+            capture_drop_scope: dz_recorder_core::CaptureDropScope::PortRole,
+        };
+        let mut b = a.clone();
+        b.identity.recorder = "recorder-2".to_owned();
+
+        let object = |sections: &[(&SectionProvenance, std::ops::Range<usize>)], name: &str| {
+            let mut bytes = Vec::new();
+            for (i, (provenance, range)) in sections.iter().enumerate() {
+                let part = dir.path().join(format!("{name}-{i}.pcapng"));
+                write_segment(&part, datagrams[range.clone()].iter(), provenance)
+                    .expect("a section");
+                bytes.extend(std::fs::read(&part).expect("readable"));
+            }
+            let path = dir.path().join(format!("{name}.pcapng"));
+            std::fs::write(&path, bytes).expect("written");
+            let mut manifest = base.manifest.clone();
+            manifest.sha256 = "0".repeat(64);
+            let found = match verify_digest(&path, &manifest) {
+                Err(DeriveError::DigestMismatch { found, .. }) => found,
+                other => panic!("{other:?}"),
+            };
+            manifest.sha256 = found;
+            crate::conformance::testing::Recorded {
+                object: path,
+                manifest,
+            }
+        };
+        let judged = |recorded: &crate::conformance::testing::Recorded| {
+            let scratch = tempfile::tempdir().expect("scratch");
+            judge(
+                recorded,
+                StubRuleSet::stating(vec![on_mktdata("TEST.ONE", Outcome::Pass, 0, 29)]),
+                scratch.path(),
+            )
+        };
+
+        let steady = object(&[(&a, 0..10), (&a, 10..20), (&a, 20..30)], "steady");
+        judged(&steady).expect("one set of claims throughout is judged");
+
+        let changed = object(&[(&a, 0..10), (&b, 10..20), (&a, 20..30)], "changed");
+        let err = judged(&changed).expect_err("refused");
+        assert!(matches!(err, JudgeError::SectionChanged { .. }), "{err}");
     }
 
     /// A channel row and an instance row for the same rule over the same
