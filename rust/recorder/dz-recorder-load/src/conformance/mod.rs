@@ -20,5 +20,7 @@
 //! feed no `[[conformance]]` entry names.
 
 pub mod findings;
+pub mod judge;
+pub mod rows;
 #[cfg(test)]
 pub(crate) mod testing;

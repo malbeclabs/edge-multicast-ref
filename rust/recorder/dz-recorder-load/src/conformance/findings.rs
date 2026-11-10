@@ -278,21 +278,33 @@ pub fn unrun(manifest: &SegmentManifest, group: Ipv4Addr, entry: &RuleOutcome) -
 
 /// Entries that could not be written, by cause. Counted, never filed under a
 /// guess.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Refused {
     /// The rule set named no instance. A finding on the wrong instance sends a
     /// reader to a sequence space where the evidence is not, so none is chosen.
+    ///
+    /// Today this is every rule the rule set decides over state every path of a
+    /// channel fills — the book, the snapshot groups, the reference data — which
+    /// it places on no instance by design. Counted by rule as well, so the
+    /// volume of what this table does not yet hold is a number rather than an
+    /// absence.
     pub no_instance: u64,
     /// The rule set named an instance this object's manifest does not describe,
     /// or one on a port the recorder did not join in that group — so there is
     /// no coverage to state its window by and no role to file it under.
     pub undescribed_instance: u64,
+    /// `no_instance`, by rule. The rule id is the rule set's, carried through
+    /// opaquely; nothing here knows what any of them mean.
+    pub no_instance_by_rule: BTreeMap<String, u64>,
 }
 
 impl Refused {
-    pub fn add(&mut self, other: Self) {
+    pub fn add(&mut self, other: &Self) {
         self.no_instance += other.no_instance;
         self.undescribed_instance += other.undescribed_instance;
+        for (rule, n) in &other.no_instance_by_rule {
+            *self.no_instance_by_rule.entry(rule.clone()).or_default() += n;
+        }
     }
 
     #[must_use]
@@ -341,6 +353,10 @@ pub fn place<'a>(
     for entry in &report.rules {
         let Some(named) = entry.instance else {
             refused.no_instance += 1;
+            *refused
+                .no_instance_by_rule
+                .entry(entry.rule_id.clone())
+                .or_default() += 1;
             continue;
         };
         let instance = ChannelInstance::from(named);
@@ -681,12 +697,11 @@ pub(crate) mod tests {
         let (placed, refused) = place(&m, GROUP, &r, &Holes::default());
         assert_eq!(placed.len(), 1);
         assert_eq!(placed[0].entry.rule_id, "TEST.HERE");
+        assert_eq!(refused.no_instance, 1);
+        assert_eq!(refused.undescribed_instance, 1);
         assert_eq!(
-            refused,
-            Refused {
-                no_instance: 1,
-                undescribed_instance: 1,
-            }
+            refused.no_instance_by_rule,
+            BTreeMap::from([("TEST.NOWHERE".to_owned(), 1)])
         );
     }
 
