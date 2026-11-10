@@ -212,6 +212,14 @@ Two rules, both read from the manifest and neither from configuration:
 - A finding is placed on the channel instance the report names. A report entry
   naming none is **refused and counted**, never filed under a guess: a finding on
   the wrong instance sends a reader to a sequence space where the evidence is not.
+- **Except at channel grain** (spec, *Channel grain*). An entry that names no
+  instance but states a `Channel ID` and a port role is a rule decided over
+  every path of the channel, and is written with `source_addr = 0.0.0.0` on the
+  one port the recorder joined for that role in the group; a port that cannot be
+  resolved to exactly one, or a channel that never appeared on it, is refused
+  and counted as `channel_unresolved`. Its absence downgrade is stricter — any
+  hole on any path of that channel and port — and its `first_seq`/`last_seq` are
+  0. An entry naming neither an instance nor a channel is refused as above.
 
 **Verification:** unit tests over manifest fixtures. A manifest whose
 `roles_joined` omits the snapshot role yields `na` for a rule that needs it and
@@ -219,7 +227,11 @@ leaves the mktdata rules alone. A manifest that claims the role but whose
 `instances` map has no entry on that port yields `na` too, and the test asserts
 the two cases produce the same verdict for different reasons — because the code
 paths differ and only one of them is obvious. A report entry with no instance
-raises the refusal counter and produces no row.
+raises the refusal counter and produces no row. A channel-scoped entry produces a `0.0.0.0` row;
+one whose port cannot be resolved raises `channel_unresolved` and produces none;
+a hole on any path of the channel turns a channel violation `unverifiable`
+wherever its range lies; and a channel row and an instance row for one rule over
+one window both stand.
 
 ### 4. The absence downgrade
 

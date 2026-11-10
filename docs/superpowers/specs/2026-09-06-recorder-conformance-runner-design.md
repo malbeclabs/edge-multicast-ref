@@ -359,6 +359,53 @@ violating evidence, that is the row's instance. Where it does not, the runner
 finding placed on the wrong instance is worse than one nobody wrote, because it
 sends a reader to a sequence space where the evidence is not.
 
+### Channel grain: a rule no single publisher is the subject of
+
+Some rules are not about one path at all. A rule decided over state every path
+of a channel fills — the book, the snapshot groups, the reference data, the
+counters kept per channel — has no instance to name, because two redundant
+publishers fill that state together and neither is its subject. The rule set
+says so by naming no instance and stating the `Channel ID` and the port role
+instead; its own metrics say the same thing with an empty `source_addr`.
+
+**Such a verdict is written at channel grain, with `source_addr = 0.0.0.0`.**
+The value means *decided over state every path of the channel fills; no single
+publisher is the subject*, and it is unambiguous: `0.0.0.0` is the unspecified
+address, which no host sends from, so it is never a publisher's source address
+and no datagram in an archive carries it. A channel row therefore cannot be
+mistaken for a row about a path, and a query that wants only per-path verdicts
+excludes it by that one value.
+
+The rest of the row's key is resolved, never guessed:
+
+- `channel_id` is the one the rule set stated. An entry that names neither an
+  instance nor a channel is still refused and counted.
+- `dst_port` is **the one port the recorder joined, in the group being judged,
+  for the port role the rule set stated** — and only if that channel appears on
+  it in the object's manifest. No role stated, no port joined for it, more than
+  one port joined for it, or a channel that never appeared there: each is
+  refused and counted (`channel_unresolved`), because a row key the runner chose
+  is a finding placed on a guess.
+- `port_role` is that role.
+
+Two things differ from an instance row, both because a channel row spans every
+path's sequence space rather than one:
+
+- **The absence downgrade is stricter.** The evidence a channel rule cites does
+  not lie in one sequence space, so its range cannot be held against one path's
+  holes. A `violation` or a `pass` at channel grain is `unverifiable` if **any**
+  path that carried the channel to that port has **any** hole in the object,
+  wherever the cited range lies: the state the rule judged may be missing
+  exactly what the hole took.
+- **`first_seq` and `last_seq` are 0.** No one range describes a channel, and
+  one path's numbers presented as the channel's would send a reader to a single
+  sequence space the verdict was not about.
+
+A channel row and an instance row for the same rule over the same window are
+two keys — `source_addr` is in the sort key — so both stand. The reduction of
+several stated entries to one row is per `(rule, source_addr, channel_id,
+dst_port, window)`, the worst verdict winning, exactly as for an instance.
+
 ---
 
 ## A rule set the runner does not recognise
