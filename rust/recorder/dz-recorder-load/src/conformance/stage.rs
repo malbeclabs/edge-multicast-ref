@@ -701,6 +701,41 @@ mod tests {
         assert_eq!(findings(&rows), 2);
     }
 
+    /// Under the default, a clean object writes no row and is still judged:
+    /// its empty batch lands, the ledger records it, and the next pass does
+    /// not judge it again. A violation beside it is the only row written.
+    #[test]
+    fn by_default_a_clean_object_writes_no_row_and_is_still_judged_once() {
+        let clean_host = host(2);
+        let metrics = LoaderMetrics::new(SITE, RECORDER);
+        let rows = clean_host.dir.path().join("rows");
+        let mut ledger =
+            JudgeLedger::open(clean_host.dir.path().join("judged.jsonl")).expect("ledger");
+        let mut feeds = feed(clean());
+        feeds[0].verdicts = KeptVerdicts::default();
+
+        let (pass, errors) = judge_pass(&clean_host, &rows, &feeds, &mut ledger, &metrics, 0);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!((pass.judged, pass.recorded, pass.unjudged), (2, 2, 0));
+        assert_eq!(ledger.entries(), 2, "a clean object is ledgered");
+        assert_eq!(findings(&rows), 0, "a pass writes no row");
+
+        let (pass, _) = judge_pass(&clean_host, &rows, &feeds, &mut ledger, &metrics, 0);
+        assert_eq!(pass.judged, 0, "and is not judged again");
+
+        let violating = host(1);
+        let rows = violating.dir.path().join("rows");
+        let mut ledger = JudgeLedger::in_memory();
+        let mut feeds = feed(StubRuleSet::stating(vec![
+            on_mktdata("TEST.ONE", Outcome::Pass, 0, 99),
+            on_mktdata("TEST.TWO", Outcome::Violation, 0, 99),
+        ]));
+        feeds[0].verdicts = KeptVerdicts::default();
+        let (pass, _) = judge_pass(&violating, &rows, &feeds, &mut ledger, &metrics, 0);
+        assert_eq!(pass.recorded, 1);
+        assert_eq!(findings(&rows), 1, "only the violation");
+    }
+
     /// A tool that answers with another version judges nothing, says so, and
     /// leaves the objects unjudged — counted in the lag, not hidden.
     #[test]

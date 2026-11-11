@@ -312,6 +312,11 @@ alone would make a *re-derived* object look loaded when its rows are not there.
 The tables are `ReplacingMergeTree` on the same pair, so a re-run after an
 analyser fix is a replace rather than a duplication.
 
+One exception: a `[[conformance]]` feed with the default `verdicts =
+"violations"`. A re-judge there can add a violation row but never remove one. A
+violation the re-judge no longer finds writes nothing to replace it, and the
+loader only inserts, so the old row stays until it is deleted by hand.
+
 Two consequences follow, and both look wrong until the above is in mind:
 
 - **The ledger entry is written after the rows are in.** An entry written first

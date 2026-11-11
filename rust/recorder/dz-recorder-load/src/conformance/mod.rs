@@ -105,6 +105,15 @@ pub enum KeptVerdicts {
 }
 
 impl KeptVerdicts {
+    /// The configuration's spelling, as `--check` says it back.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Violations => "violations",
+            Self::All => "all",
+        }
+    }
+
     #[must_use]
     pub fn keeps(self, verdict: dz_recorder_rows::FindingVerdict) -> bool {
         match self {

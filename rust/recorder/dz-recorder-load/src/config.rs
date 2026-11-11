@@ -771,11 +771,12 @@ impl LoaderConfig {
         for judged in &self.conformance {
             let _ = writeln!(
                 out,
-                "conformance feed={} rule_set_feed={} tool={} rule_set_version={}",
+                "conformance feed={} rule_set_feed={} tool={} rule_set_version={} verdicts={}",
                 judged.feed,
                 judged.rule_set_feed,
                 judged.tool.display(),
-                judged.rule_set_version
+                judged.rule_set_version,
+                judged.verdicts.name()
             );
         }
         if !self.conformance.is_empty() {
@@ -1341,6 +1342,10 @@ persist_snapshot_levels = true
             "{summary}"
         );
         assert!(summary.contains("rule_set_version=v1+abc"), "{summary}");
+        assert!(
+            summary.contains("verdicts=violations"),
+            "the defaulted key is said back: {summary}"
+        );
         assert!(summary.contains("conformance_ledger="), "{summary}");
     }
 
