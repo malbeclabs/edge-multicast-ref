@@ -300,10 +300,10 @@ fn read_manifest(completed: &Path) -> SegmentManifest {
     serde_json::from_str(&json).unwrap_or_else(|e| panic!("the manifest deserialises: {e}: {json}"))
 }
 
-/// The same stream as recorded through a starvation window.
+/// The same feed as recorded through a starvation window.
 ///
 /// What [`SyntheticPublisher`](dz_recorder_replay::synthetic::SyntheticPublisher)
-/// does to its own stream, applied to one the real encoder wrote: the
+/// does to its own feed, applied to one the real encoder wrote: the
 /// datagrams in the window never reach the archive, and the next one that does
 /// carries their count in its `drop_delta`. So the hole is the recorder's own,
 /// and admitted.

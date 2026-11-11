@@ -363,7 +363,7 @@ fn what_the_publisher_wrote_and_the_recorder_kept_is_valid_by_the_spec() {
     common::conformance::conformance_of(&archive, "mbp").assert_clean();
 }
 
-/// The stream the specification warns about by name: a removal carrying an
+/// The feed the specification warns about by name: a removal carrying an
 /// Action other than Delete. It is self-consistent, so every other test in this
 /// file passes it.
 ///
@@ -480,17 +480,19 @@ fn the_conformance_gate_fails_a_snapshot_the_spec_forbids() {
     );
 }
 
-/// The rows the runner wrote over one recorded stream, with what every row
-/// shares asserted once.
+/// The rows the runner wrote over one recorded feed, with what every row
+/// shares asserted once. Recorded under the market-by-price feed name, which
+/// the runner copies into every row.
 #[cfg(feature = "conformance")]
 fn findings(sent: &[OwnedDatagram]) -> Vec<ConformanceFinding> {
-    let archive = record(sent, ALL_ROLES);
+    let archive = common::record_feed(sent, ALL_ROLES, MarketByPrice::NAME);
+    assert_eq!(archive.manifest.feed, MarketByPrice::NAME);
     let findings = common::conformance::findings_of(&archive, "mbp");
     assert_eq!(findings.refused, 0, "every stated verdict was placed");
     for row in &findings.rows {
         assert_eq!(row.rule_set_version, findings.version);
         assert_eq!(row.object_key, archive.manifest.object_key);
-        assert_eq!(row.feed, archive.manifest.feed);
+        assert_eq!(row.feed, MarketByPrice::NAME);
         assert_eq!(row.window_start, Nanos(archive.manifest.start_ns));
         assert_eq!(row.window_end, Nanos(archive.manifest.end_ns));
     }
@@ -518,7 +520,7 @@ fn violations(rows: &[ConformanceFinding]) -> Vec<&str> {
 
 #[cfg(feature = "conformance")]
 #[test]
-fn the_runner_writes_the_violation_a_stream_breaks_as_a_row() {
+fn the_runner_writes_the_violation_a_feed_breaks_as_a_row() {
     // The gate above as the runner sees it: not an exit code but a row, on the
     // instance the Change came from, at the sequence number that carried zero.
     let rows = findings(&zero_quantity_change());
@@ -539,8 +541,8 @@ fn the_runner_writes_the_violation_a_stream_breaks_as_a_row() {
 #[cfg(feature = "conformance")]
 #[test]
 fn the_runner_writes_the_violation_a_snapshot_breaks_as_a_row() {
-    // A snapshot group is state every path of the channel fills, so the rule
-    // set names the channel and not one publisher: the row is at channel grain.
+    // The rule set reports this rule at channel grain, naming the channel and
+    // not one publisher, so the row is at channel grain too.
     let rows = findings(&malformed_snapshot());
     assert_eq!(
         violations(&rows),
@@ -567,7 +569,7 @@ const BEFORE_THE_VIOLATION: StarvationWindow = StarvationWindow { first: 1, coun
 #[cfg(feature = "conformance")]
 #[test]
 fn a_violation_whose_evidence_our_own_hole_touches_is_unverifiable() {
-    // The same stream, recorded through a starvation window that took the
+    // The same feed, recorded through a starvation window that took the
     // datagram before the Change carrying zero. The violation is still in the
     // archive, and the rule set still states it — but its evidence starts
     // right after a hole the recorder admits to, so it is not a row this

@@ -247,7 +247,7 @@ jobs:
   conformance:
     runs-on: ubuntu-latest
     env:
-      # The released binary and not a build of the source: a release stamps the
+      # The released binary and not a build of the Go code: a release stamps the
       # commit it was built from, and the runner refuses a tool that answers
       # `dev+none`. What passes here is therefore the same binary a loader host
       # would be given, answering the same version.

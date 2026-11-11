@@ -61,9 +61,9 @@ fn tool() -> PathBuf {
             "{TOOL_ENV} is unset. This suite validates the archive against \
              edge-feed-spec's dz-conformance, which lives in that repository: download a \
              release of it (the one `.github/workflows/rust-codec.yml` pins) and point \
-             {TOOL_ENV} at the binary. A build of the source answers `dev+none` unless it is \
+             {TOOL_ENV} at the binary. A build of the Go code answers `dev+none` unless it is \
              stamped, and the runner refuses it. Skipping instead would report a clean feed \
-             for a stream nobody checked."
+             for a feed nobody checked."
         )
     });
     let path = PathBuf::from(path);
