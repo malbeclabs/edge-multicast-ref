@@ -267,9 +267,8 @@ jobs:
       SPEC_TAG: conformance/v0.5.0
       SPEC_VERSION: v0.5.0+546ed5c2a7d3
       SPEC_ASSET: dz-conformance_0.5.0_linux_amd64
-      # The archive's digest, pinned here as well as checked against the
-      # release's own `.sha256`: that file only proves the two assets agree,
-      # and a release can be replaced under its tag.
+      # The archive's digest, pinned here: a release can be replaced under
+      # its tag, and its own `.sha256` would be replaced with it.
       SPEC_SHA256: 0c9881bceb74e17b6c16800cea9ab7326ffd0f376165ddde7f82f9fc69f9d28d
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -280,8 +279,6 @@ jobs:
         run: |
           base="https://github.com/malbeclabs/edge-feed-spec/releases/download/${SPEC_TAG}"
           curl -fsSL --retry 3 -o "${SPEC_ASSET}.tar.gz" "${base}/${SPEC_ASSET}.tar.gz"
-          curl -fsSL --retry 3 -o "${SPEC_ASSET}.tar.gz.sha256" "${base}/${SPEC_ASSET}.tar.gz.sha256"
-          sha256sum --check --strict "${SPEC_ASSET}.tar.gz.sha256"
           echo "${SPEC_SHA256}  ${SPEC_ASSET}.tar.gz" | sha256sum --check --strict
           tar -xzf "${SPEC_ASSET}.tar.gz"
           mv "${SPEC_ASSET}/dz-conformance" "$RUNNER_TEMP/dz-conformance"

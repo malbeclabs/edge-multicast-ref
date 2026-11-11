@@ -14,7 +14,7 @@ use dz_recorder_archive::SegmentManifest;
 use dz_recorder_core::ChannelInstance;
 use dz_recorder_rows::{ConformanceFinding, Derivation, FindingVerdict, Nanos, PortRoleLabel};
 
-use super::findings::{with_note, Placed, Subject};
+use super::findings::{stated, with_note, Placed, Subject};
 
 /// How bad a verdict is, for the reduction.
 ///
@@ -79,7 +79,16 @@ fn row(stamp: &RunStamp<'_>, group: &[&Placed<'_>]) -> ConformanceFinding {
         .copied()
         .filter(|p| severity(p.verdict) == worst)
         .collect();
-    let first = winners[0];
+    // The entry the row speaks for: among the winners, the one the rule set
+    // stated most severely. A pass and a violation a hole both downgraded tie
+    // as unverifiable, and the row's detail is then the violation's message
+    // with its note, not the pass's.
+    let first = winners
+        .iter()
+        .copied()
+        .rev()
+        .max_by_key(|p| severity(stated(p.entry.outcome)))
+        .expect("a group is never empty");
 
     // The span of the winning verdict's evidence, in the era of the first
     // range that cites one — its reset count, and its era ordinal where the
@@ -346,6 +355,61 @@ mod tests {
         );
         assert!(
             rows[0].detail.contains("pass stated over 2 entries"),
+            "{}",
+            rows[0].detail
+        );
+    }
+
+    /// A pass and a violation of one rule on one instance, both over a hole,
+    /// are both unverifiable. The row keeps the violation's message, so it
+    /// still says what the rule set saw, and the pass's message is not
+    /// mistaken for it.
+    #[test]
+    fn a_downgraded_violation_speaks_for_the_row_over_a_downgraded_pass() {
+        use crate::conformance::findings::tests::SOURCE_IP;
+        use dz_recorder_loss::SequenceRun;
+
+        let m = manifest(
+            vec![joined(PortRole::Mktdata, GROUP, MKTDATA)],
+            &[(MKTDATA, coverage(0, 99))],
+        );
+        let mut holes = Holes::default();
+        holes.missing(&SequenceRun {
+            instance: ChannelInstance::new(SOURCE_IP, 1, MKTDATA),
+            group: GROUP,
+            role: PortRole::Mktdata,
+            era_ordinal: 1,
+            reset_count: 0,
+            missing_from: 5,
+            missing_to: 5,
+            before_ts_ns: 0,
+            after_ts_ns: 0,
+        });
+        let mut pass = ranged("TEST.A", Outcome::Pass, MKTDATA, 4, 6);
+        pass.detail = "the pass".to_owned();
+        let mut violation = ranged("TEST.A", Outcome::Violation, MKTDATA, 5, 7);
+        violation.detail = "the violation".to_owned();
+        let r = report(vec![pass, violation]);
+        let (placed, _) = place(&m, GROUP, &r, &holes, &carried(&m));
+        let rows = finding_rows(
+            &RunStamp {
+                manifest: &m,
+                rule_set_version: "v1+abc",
+                run_ts: 42,
+            },
+            &placed,
+        );
+        assert_eq!(rows.len(), 1, "{rows:#?}");
+        assert_eq!(rows[0].verdict, FindingVerdict::Unverifiable);
+        assert!(
+            rows[0].detail.starts_with("the violation"),
+            "{}",
+            rows[0].detail
+        );
+        assert!(
+            rows[0]
+                .detail
+                .contains("unverifiable stated over 2 entries"),
             "{}",
             rows[0].detail
         );

@@ -501,7 +501,7 @@ pub struct Placed<'a> {
 /// `suspected` is a first mismatch the rule set itself has not confirmed and
 /// does not fail its own gate on, so it is not a violation here either: it is
 /// `unverifiable`, with the rule's own message kept.
-const fn stated(outcome: Outcome) -> FindingVerdict {
+pub(crate) const fn stated(outcome: Outcome) -> FindingVerdict {
     match outcome {
         Outcome::Pass => FindingVerdict::Pass,
         Outcome::Violation => FindingVerdict::Violation,

@@ -391,22 +391,24 @@ fn zero_quantity_change() -> Vec<OwnedDatagram> {
     wire.sent
 }
 
-/// A snapshot cycle whose level claims to belong to a different snapshot than
-/// the one it opened, behind two well-formed cycles.
+/// A snapshot cycle whose level carries quantity 0, behind two well-formed
+/// cycles.
 ///
-/// The violation is structural: the Begin is in the same datagram as the level
-/// that contradicts it, so no lost datagram stands between them. The cycles in
-/// front of it are there for the same reason as the Changes above, so a
-/// starvation window has something on either side of it.
+/// The rule set states it a violation however lossy the snapshot port is: loss
+/// drops whole datagrams and never rewrites a field. So over a starvation
+/// window the tool still says violation, and only the runner's own downgrade
+/// can make the row unverifiable. The cycles in front of it are there for the
+/// same reason as the Changes above, so a starvation window has something on
+/// either side of it.
 #[cfg(feature = "conformance")]
 fn malformed_snapshot() -> Vec<OwnedDatagram> {
     let mut wire = Wire::new();
     let mut snapshot = fresh(SNAPSHOT_CHANNEL);
-    for (snapshot_id, level_snapshot_id) in [
-        (SNAPSHOT_ID, SNAPSHOT_ID),
-        (SNAPSHOT_ID + 1, SNAPSHOT_ID + 1),
-        // belongs to no open group
-        (SNAPSHOT_ID + 2, SNAPSHOT_ID + 3),
+    for (snapshot_id, qty) in [
+        (SNAPSHOT_ID, 12_500),
+        (SNAPSHOT_ID + 1, 12_500),
+        // an empty level is represented by absence, never by zero
+        (SNAPSHOT_ID + 2, 0),
     ] {
         let payload = datagram(snapshot, PortRole::Snapshot, |b| {
             b.push(&SnapshotBegin {
@@ -419,9 +421,10 @@ fn malformed_snapshot() -> Vec<OwnedDatagram> {
                 depth_bound: 50,
             })
             .expect("the encoder does not judge a group");
-            let mut level = snapshot_level(9_999_500, 12_500, SIDE_BID);
-            level.snapshot_id = level_snapshot_id;
-            b.push(&level).expect("nor does it judge a level's id");
+            let mut level = snapshot_level(9_999_500, qty, SIDE_BID);
+            level.snapshot_id = snapshot_id;
+            b.push(&level)
+                .expect("nor does it judge a level's quantity");
             b.push(&SnapshotEnd {
                 instrument_id: INSTRUMENT,
                 anchor_seq: ANCHOR_SEQ,
@@ -543,10 +546,15 @@ fn the_runner_writes_the_violation_a_feed_breaks_as_a_row() {
 fn the_runner_writes_the_violation_a_snapshot_breaks_as_a_row() {
     // The rule set reports this rule at channel grain, naming the channel and
     // not one publisher, so the row is at channel grain too.
+    // The zero level breaks the group's structure, and the ladder it states
+    // no longer matches the book the deltas built, so both rules say so.
     let rows = findings(&malformed_snapshot());
     assert_eq!(
         violations(&rows),
-        vec!["MBP.SNAP.GROUP_STRUCTURE"],
+        vec![
+            "MBP.SNAP.GROUP_STRUCTURE",
+            "MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT"
+        ],
         "{rows:#?}"
     );
     let row = row_for(&rows, "MBP.SNAP.GROUP_STRUCTURE");
@@ -607,6 +615,9 @@ fn a_channel_violation_over_a_channel_with_our_own_hole_is_unverifiable() {
     let row = row_for(&rows, "MBP.SNAP.GROUP_STRUCTURE");
     assert_eq!(row.verdict, FindingVerdict::Unverifiable, "{row:#?}");
     assert_eq!(row.source_addr, Ipv4Addr::UNSPECIFIED);
+    // The rule set's violation, not a pass: the row carries its message, so
+    // the downgrade is the runner's and not the tool's own.
+    assert!(row.detail.contains("Quantity = 0"), "{row:#?}");
     assert!(
         row.detail.contains(&format!(
             "the path from {PUBLISHER_A} has 0:1-1 missing in this object"
