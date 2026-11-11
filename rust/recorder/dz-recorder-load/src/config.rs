@@ -309,9 +309,9 @@ fn destination(path: &std::path::Path) -> PathBuf {
 
 /// One feed the specification's rule set is run over.
 ///
-/// Every key is required and none has a default: a feed judged with a guessed
-/// tool, a guessed rule set name or an unstated version is a feed whose
-/// verdicts nobody can attribute.
+/// Every key but `verdicts` is required and has no default: a feed judged with
+/// a guessed tool, a guessed rule set name or an unstated version is a feed
+/// whose verdicts nobody can attribute.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConformanceFeed {
@@ -325,6 +325,9 @@ pub struct ConformanceFeed {
     /// What the tool must answer `--version` with. Every pass asks it, and a
     /// tool that answers anything else judges nothing that pass.
     pub rule_set_version: String,
+    /// Which verdicts are written: `violations` (the default) or `all`.
+    #[serde(default)]
+    pub verdicts: crate::conformance::KeptVerdicts,
 }
 
 /// One feed's derivation, and the two things it cannot be guessed.
@@ -1262,6 +1265,26 @@ persist_snapshot_levels = true
         let dir = tempfile::tempdir().expect("a temporary directory");
         let config = config_with_objects_dir(dir.path());
         assert!(config.feeds_without_a_directory().is_empty());
+    }
+
+    /// A feed writes only violations unless it says `verdicts = "all"`, and no
+    /// other value is read.
+    #[test]
+    fn a_feed_writes_only_violations_unless_it_says_all() {
+        use crate::conformance::KeptVerdicts;
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let (config, _) = judging(dir.path(), "");
+        assert_eq!(config.conformance[0].verdicts, KeptVerdicts::Violations);
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let (config, _) = judging(dir.path(), "verdicts = \"all\"\n");
+        assert_eq!(config.conformance[0].verdicts, KeptVerdicts::All);
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let (_, text) = judging(dir.path(), "");
+        let text = text + "verdicts = \"pass\"\n";
+        assert!(
+            LoaderConfig::parse(&text).is_err(),
+            "an unknown value is refused"
+        );
     }
 
     /// A configuration with a `[[conformance]]` entry whose tool is a real

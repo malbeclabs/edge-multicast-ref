@@ -20,6 +20,8 @@
 //! as an opaque string. Off by default and per feed: nothing here runs for a
 //! feed no `[[conformance]]` entry names.
 
+use serde::{Deserialize, Serialize};
+
 pub mod findings;
 pub mod judge;
 pub mod ledger;
@@ -81,6 +83,32 @@ impl ConformanceRefusal {
             Self::Overflow => "overflow",
             Self::ToolFailedOnObject => "tool_failed_on_object",
             Self::GivenUp => "given_up",
+        }
+    }
+}
+
+/// Which verdicts become `conformance_finding` rows.
+///
+/// The table has no TTL, and a row for every rule on every instance of every
+/// object is mostly passes. By default only violations are written: the judge
+/// ledger, not the table, records that an object was judged, so an object with
+/// no row was judged and had no violation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum KeptVerdicts {
+    /// Only `violation` rows.
+    #[default]
+    Violations,
+    /// Every verdict: `pass`, `violation`, `unverifiable` and `na`.
+    All,
+}
+
+impl KeptVerdicts {
+    #[must_use]
+    pub fn keeps(self, verdict: dz_recorder_rows::FindingVerdict) -> bool {
+        match self {
+            Self::All => true,
+            Self::Violations => verdict == dz_recorder_rows::FindingVerdict::Violation,
         }
     }
 }

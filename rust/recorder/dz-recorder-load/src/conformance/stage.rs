@@ -22,7 +22,7 @@ use dz_recorder_rows::{ObjectId, RowSink};
 use super::findings::Refused;
 use super::judge::{judge_object, JudgeInput};
 use super::ledger::{JudgeEntry, JudgeLedger};
-use super::ConformanceRefusal;
+use super::{ConformanceRefusal, KeptVerdicts};
 use crate::loader::{
     now_unix_nanos, now_unix_seconds, oldest_age, read_manifest_if_present, take_turns,
 };
@@ -40,6 +40,8 @@ pub struct JudgedFeed<R> {
     /// What the rule set must answer with.
     pub rule_set_version: String,
     pub rule_set: R,
+    /// Which verdicts become rows.
+    pub verdicts: KeptVerdicts,
 }
 
 /// An object whose findings the sink holds, not yet in the ledger.
@@ -227,6 +229,7 @@ impl<S: RowSink, R: RuleSet + Clone> Judge<'_, S, R> {
                 manifest: &w.manifest,
                 rule_set: pinned,
                 rule_set_feed: &judged_feed.rule_set_feed,
+                verdicts: judged_feed.verdicts,
                 scratch: self.scratch,
                 run_ts: now_unix_nanos(),
             }) {
@@ -540,6 +543,7 @@ mod tests {
             rule_set_feed: "tob".to_owned(),
             rule_set_version: VERSION.to_owned(),
             rule_set,
+            verdicts: KeptVerdicts::All,
         }]
     }
 
@@ -936,6 +940,7 @@ mod tests {
             rule_set_feed: "tob".to_owned(),
             rule_set_version: VERSION.to_owned(),
             rule_set: clean(),
+            verdicts: KeptVerdicts::All,
         });
         let first_runs = std::rc::Rc::clone(&feeds[0].rule_set.runs);
         let second_runs = std::rc::Rc::clone(&feeds[1].rule_set.runs);

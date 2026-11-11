@@ -402,12 +402,17 @@ A refused object is counted, named on stderr, and left unloaded. The pass carrie
 on: one damaged file must not stop an archive from being loaded, and the object
 it would stop at is the one closest to eviction.
 
-## Not here yet
+## Conformance
 
-The conformance runner over replay. `conformance_finding` is created as the
-table a runner fills, and this loader writes no row into it — an empty table is
-the honest statement that nothing judged the object, where a `pass` row would be
-a pass over a rule that never ran.
+A `[[conformance]]` entry runs the specification's rule set over every object
+of that feed and writes `conformance_finding` (see `loader.example.toml`). By
+default only `violation` rows are written; `verdicts = "all"` writes every
+verdict. Without passes, an object with no row was judged clean or not judged
+at all, and only the conformance ledger on this host tells the two apart. The
+design, and what writing only violations gives up, is in
+`docs/superpowers/specs/2026-09-06-recorder-conformance-runner-design.md`.
+
+## Not here yet
 
 The cross-site pass that turns `unverifiable` into `publisher`. This loader
 never writes `publisher`: it needs a datagram absent from *every* site with no

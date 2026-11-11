@@ -148,6 +148,11 @@ max_objects_per_pass = 60
 # names no commit (dev+none, x+none, x+) is refused: every unstamped build gives
 # it alike.
 # rule_set_version = "v0.5.0+0123456789ab"
+#
+# Which verdicts become conformance_finding rows: "violations" (the default) or
+# "all". The table has no TTL, and with "all" most of it is passes. An object
+# with no row was still judged: the conformance ledger records it.
+# verdicts = "violations"
 
 [clickhouse]
 # No path and no query: those are the loader's. `https` is refused unless the
