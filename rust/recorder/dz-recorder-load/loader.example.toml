@@ -110,6 +110,45 @@ max_objects_per_pass = 60
 # snapshot complete" without the levels being there to count.
 # persist_snapshot_levels = false
 
+# CONFORMANCE JUDGING IS OFF, AND IT IS OFF BY THE ABSENCE OF THIS SECTION.
+#
+# Naming a feed runs the specification's own rule set over every object of that
+# feed no rule set version has judged yet, and writes conformance_finding. The
+# rule set is a binary this repository does not build; the loader runs it once
+# per multicast group per object, over a copy of the object re-written into
+# conformance_scratch, and writes only the verdicts it states — never a pass it
+# inferred from an exit code.
+#
+# A NEW rule_set_version DOES NOT RE-JUDGE THE ARCHIVE. Objects already judged
+# under any version are left alone; re-judging history is a deliberate act over
+# a chosen range, not a consequence of a deploy.
+#
+# Both paths are required once a feed is named, and neither may be inside
+# objects_dir or be the load ledger.
+# conformance_ledger = "/var/lib/dz-recorder-load/judged.jsonl"   (under [loader])
+# conformance_scratch = "/var/lib/dz-recorder-load/scratch"       (under [loader])
+#
+# [[conformance]]
+# The manifest's `feed`, matched exactly, and the subdirectory of objects_dir it
+# is written under. Must be in [loader] feeds when that key is present.
+# feed = "market-by-price"
+#
+# The rule set's own name for the feed, as its -feed takes it. Not guessed from
+# the spec name above.
+# rule_set_feed = "mbp"
+#
+# The binary. Required, absolute and executable, with no default and no PATH
+# search: a runner that found one would stamp its verdicts with whatever rule set
+# happened to be installed. Links are resolved, and the resolved file is what
+# runs.
+# tool = "/opt/dz-conformance/bin/dz-conformance"
+#
+# What the binary must answer --version with. Asked every pass; a binary that
+# answers anything else judges nothing, and --check says which. An answer that
+# names no commit (dev+none, x+none, x+) is refused: every unstamped build gives
+# it alike.
+# rule_set_version = "v0.5.0+0123456789ab"
+
 [clickhouse]
 # No path and no query: those are the loader's. `https` is refused unless the
 # binary was built with the `tls` feature, rather than silently downgraded — so

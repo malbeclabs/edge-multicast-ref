@@ -42,10 +42,12 @@ pub mod report;
 pub mod segment;
 pub mod tool;
 
-pub use report::{EvidenceRange, Outcome, ReportError, ReportInstance, RuleOutcome, RuleSetReport};
+pub use report::{
+    EvidenceRange, NeededRole, Outcome, ReportError, ReportInstance, RuleOutcome, RuleSetReport,
+};
 pub use segment::{
     write_group_segments, write_segment, BridgeError, GroupSegment, SectionProvenance,
 };
 pub use tool::{
-    ConformanceTool, Invocation, PinnedRuleSet, PortRoles, RuleSet, ToolError, ToolRun,
+    is_stamped, ConformanceTool, Invocation, PinnedRuleSet, PortRoles, RuleSet, ToolError, ToolRun,
 };

@@ -35,6 +35,7 @@
 
 use std::net::Ipv4Addr;
 
+use dz_edge_core::PortRole;
 use dz_recorder_core::ChannelInstance;
 use serde::{Deserialize, Serialize};
 
@@ -76,14 +77,16 @@ pub enum Outcome {
 /// interface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReportInstance {
-    pub source: Ipv4Addr,
+    /// The publisher's source address, keyed `source_addr` as the rule set's
+    /// metrics label it.
+    pub source_addr: Ipv4Addr,
     pub channel_id: u8,
     pub dst_port: u16,
 }
 
 impl From<ReportInstance> for ChannelInstance {
     fn from(r: ReportInstance) -> Self {
-        Self::new(r.source, r.channel_id, r.dst_port)
+        Self::new(r.source_addr, r.channel_id, r.dst_port)
     }
 }
 
@@ -94,6 +97,11 @@ pub struct EvidenceRange {
     /// never as a key: it is a `u8` and it wraps, so two eras 256 resets apart
     /// share a value.
     pub reset_count: u8,
+    /// The era's ordinal on the instance within the rule set's run, counting
+    /// from 1. Unlike `reset_count` it does not wrap, so it is what tells two
+    /// eras 256 resets apart; absent from a report that does not state it.
+    #[serde(default)]
+    pub era_index: Option<u64>,
     pub first_seq: u64,
     pub last_seq: u64,
 }
@@ -126,6 +134,57 @@ pub struct RuleOutcome {
     /// The rule's own message, carried into the row's `detail` unaltered.
     #[serde(default)]
     pub detail: String,
+    /// The port roles the rule reads, beyond the instance it is placed on.
+    ///
+    /// What lets a rule that never ran be told from one that ran and held. A
+    /// rule anchored on the snapshot port and placed on a mktdata instance
+    /// names the snapshot role here; if the recorder never joined that role,
+    /// or joined it and received nothing, the rule judged nothing and its row
+    /// is `na` — decided from the manifest, above this module. Empty means the
+    /// rule set stated no such need, and nothing is inferred from the silence.
+    #[serde(default)]
+    pub needs: Vec<NeededRole>,
+    /// The `Channel ID` the rule was decided on, stated beside the instance and
+    /// in place of one. A rule decided over state every path of a channel fills
+    /// — the book, the snapshot groups, the reference data — names no instance,
+    /// because no single publisher is its subject; it names the channel and the
+    /// port role instead, and its row is placed at channel grain above this
+    /// module.
+    #[serde(default)]
+    pub channel_id: Option<u8>,
+    /// The port role the rule's evidence arrived on.
+    #[serde(default)]
+    pub port_role: Option<NeededRole>,
+    /// The rule set stopped tracking source addresses for this channel at its
+    /// cap, so the finding belongs to a path it can no longer name. Such an
+    /// entry names no instance and is never a channel's: it is about one path,
+    /// unknown.
+    #[serde(default)]
+    pub overflow: bool,
+}
+
+/// A port role, as a report names one.
+///
+/// Its own type rather than `PortRole`, for the reason [`ReportInstance`]
+/// spells its fields out: the report is a file another repository writes, and
+/// a token this runner does not know is a report it cannot read rather than a
+/// role it may guess at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NeededRole {
+    Mktdata,
+    Refdata,
+    Snapshot,
+}
+
+impl From<NeededRole> for PortRole {
+    fn from(role: NeededRole) -> Self {
+        match role {
+            NeededRole::Mktdata => Self::Mktdata,
+            NeededRole::Refdata => Self::Refdata,
+            NeededRole::Snapshot => Self::Snapshot,
+        }
+    }
 }
 
 /// One run of the rule set over one group's capture file.
@@ -139,6 +198,9 @@ pub struct RuleSetReport {
     pub feed: String,
     /// One entry per rule evaluated, in the order the rule set stated them.
     pub rules: Vec<RuleOutcome>,
+    /// Findings the rule set could not place at all and did not list.
+    #[serde(default)]
+    pub unplaced_findings: u64,
 }
 
 /// Why a report could not be believed.

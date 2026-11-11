@@ -184,6 +184,15 @@ pub enum ToolError {
         configured: String,
         reported: String,
     },
+    /// The tool answered with a version that names no commit: `dev+none`, or
+    /// any answer whose commit half is empty or `none`. That is the answer of a
+    /// build nobody stamped, and every such build answers the same — so two
+    /// unrelated rule sets would write their verdicts under one version.
+    #[error(
+        "{tool} answers `{version}`, which names no commit: an unstamped build's verdicts \
+         cannot be attributed to a rule set"
+    )]
+    VersionUnstamped { tool: String, version: String },
     /// The report names a feed other than the one the tool was invoked for.
     /// The same shape as [`ToolError::VersionDisagrees`] and for the same
     /// reason: a finding filed under the wrong name is a finding about
@@ -264,12 +273,34 @@ impl ConformanceTool {
 
     /// Runs the tool and returns what it did, uninterpreted.
     ///
-    /// `report` is where the tool is asked to write its per-rule report, or
-    /// `None` for a caller that wants only the exit code.
+    /// `report` is where the tool is asked to write its per-rule **counts**
+    /// (`-json-report`), or `None` for a caller that wants only the exit code.
+    /// That file is the gate's: it says how many times a rule looked, and it
+    /// places nothing. The runner reads the placed report instead, through
+    /// [`RuleSet::judge`].
     pub fn run(
         &self,
         invocation: &Invocation<'_>,
         report: Option<&Path>,
+    ) -> Result<ToolRun, ToolError> {
+        self.run_with(invocation, report.map(|p| ("-json-report", p)))
+    }
+
+    /// The same, asking for the placed report (`-rule-report`): one entry per
+    /// rule outcome, per channel instance, with the evidence range in one era.
+    /// The shape [`RuleSetReport`] reads.
+    pub fn run_for_rules(
+        &self,
+        invocation: &Invocation<'_>,
+        rule_report: &Path,
+    ) -> Result<ToolRun, ToolError> {
+        self.run_with(invocation, Some(("-rule-report", rule_report)))
+    }
+
+    fn run_with(
+        &self,
+        invocation: &Invocation<'_>,
+        report: Option<(&str, &Path)>,
     ) -> Result<ToolRun, ToolError> {
         let mut cmd = Command::new(&self.path);
         cmd.arg("-feed")
@@ -288,8 +319,8 @@ impl ConformanceTool {
                     .arg(port.to_string());
             }
         }
-        if let Some(report) = report {
-            cmd.arg("-json-report").arg(report);
+        if let Some((flag, path)) = report {
+            cmd.arg(flag).arg(path);
         }
 
         let out = cmd.output().map_err(|e| ToolError::NotStarted {
@@ -318,7 +349,7 @@ impl RuleSet for ConformanceTool {
             })?;
         let report_path = dir.path().join("report.json");
 
-        let run = self.run(invocation, Some(&report_path))?;
+        let run = self.run_for_rules(invocation, &report_path)?;
         let code = match run.code {
             Some(EXIT_CLEAN) => EXIT_CLEAN,
             Some(EXIT_VIOLATION) => EXIT_VIOLATION,
@@ -411,6 +442,21 @@ impl RuleSet for ConformanceTool {
     }
 }
 
+/// Whether a `version+commit` answer names a commit.
+///
+/// `false` for `dev+none`, for an answer with no `+`, and for any whose commit
+/// half is empty or `none` — the shapes an unstamped build answers with.
+#[must_use]
+pub fn is_stamped(version: &str) -> bool {
+    match version.trim().split_once('+') {
+        Some((_, commit)) => {
+            let commit = commit.trim();
+            !commit.is_empty() && !commit.eq_ignore_ascii_case("none")
+        }
+        None => false,
+    }
+}
+
 /// A rule set that has said which rule set it is, and agreed with the
 /// configuration.
 ///
@@ -433,6 +479,14 @@ impl<R: RuleSet> PinnedRuleSet<R> {
     /// comparison this table exists to make.
     pub fn resolve(rule_set: R, configured: &str) -> Result<Self, ToolError> {
         let reported = rule_set.rule_set_version()?;
+        // Before the comparison: a configuration that also says `dev+none`
+        // agrees with the tool and proves nothing.
+        if !is_stamped(&reported) {
+            return Err(ToolError::VersionUnstamped {
+                tool: rule_set.describe(),
+                version: reported,
+            });
+        }
         if reported != configured {
             return Err(ToolError::VersionDisagrees {
                 tool: rule_set.describe(),

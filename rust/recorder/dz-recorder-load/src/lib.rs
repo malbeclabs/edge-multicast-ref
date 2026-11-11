@@ -51,12 +51,13 @@
 #![forbid(unsafe_code)]
 
 pub mod config;
+pub mod conformance;
 pub mod ledger;
 pub mod loader;
 pub mod market_data;
 pub mod metrics;
 
-pub use config::{ConfigError, LoaderConfig, MarketDataFeed};
+pub use config::{ConfigError, ConformanceFeed, LoaderConfig, MarketDataFeed};
 pub use ledger::{Entry, Ledger, LedgerError};
 pub use loader::{now_unix_nanos, record_landed, Candidate, Loader, Pass, Pending, Recorded};
 pub use metrics::{ErrorKind, LoaderMetrics, SkipReason};

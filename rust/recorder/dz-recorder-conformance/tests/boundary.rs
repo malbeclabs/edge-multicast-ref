@@ -44,7 +44,7 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// What the stand-in leaves where `-json-report` pointed.
+/// What the stand-in leaves where `-rule-report` pointed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Report {
     /// Nothing at all, which the tool does when it fails before it can write.
@@ -223,7 +223,7 @@ impl StandIns {
              out=\"\"\n\
              pcap=\"\"\n\
              for a in \"$@\"; do\n\
-             \x20 [ \"$prev\" = \"-json-report\" ] && out=\"$a\"\n\
+             \x20 [ \"$prev\" = \"-rule-report\" ] && out=\"$a\"\n\
              \x20 [ \"$prev\" = \"-pcap\" ] && pcap=\"$a\"\n\
              \x20 prev=\"$a\"\n\
              done\n\
@@ -385,7 +385,7 @@ fn an_exit_of_one_yields_the_report_it_wrote() {
         violation
             .instance
             .expect("the entry names an instance")
-            .source,
+            .source_addr,
         Ipv4Addr::new(192, 0, 2, 1),
         "which is what places the row, and is read rather than guessed"
     );
@@ -659,8 +659,12 @@ fn a_role_nobody_joined_leaves_its_flag_unset() {
     );
     assert!(!argv.contains(&"-refdata-port".to_owned()), "{argv:?}");
     assert!(
-        argv.contains(&"-json-report".to_owned()),
-        "the report is asked for by the same invocation that judges: {argv:?}"
+        argv.contains(&"-rule-report".to_owned()),
+        "the placed report is asked for by the same invocation that judges: {argv:?}"
+    );
+    assert!(
+        !argv.contains(&"-json-report".to_owned()),
+        "and not the counts, which place nothing: {argv:?}"
     );
     assert!(
         argv.contains(&GROUP.to_string()),
@@ -827,4 +831,27 @@ fn an_unknown_field_does_not_break_the_parse() {
         "the fixture carries a field this crate has no name for"
     );
     assert!(RuleSetReport::from_json(text.as_bytes()).is_ok());
+}
+
+/// An unstamped build answers `dev+none`, and so does every other unstamped
+/// build. A configuration that says the same agrees with it and proves
+/// nothing, so the answer is refused before it is compared.
+#[test]
+fn an_unstamped_rule_set_is_refused_even_when_the_configuration_agrees() {
+    for unstamped in ["dev+none", "0.4.2+none", "0.4.2+", "0.4.2", "0.4.2+NONE"] {
+        let Err(err) = PinnedRuleSet::resolve(
+            StubRuleSet {
+                version: Ok(unstamped.to_owned()),
+            },
+            unstamped,
+        ) else {
+            panic!("`{unstamped}` names no commit");
+        };
+        assert!(
+            matches!(err, ToolError::VersionUnstamped { .. }),
+            "{unstamped}: {err}"
+        );
+        assert!(err.to_string().contains(unstamped), "{err}");
+    }
+    assert!(dz_recorder_conformance::is_stamped(VERSION));
 }

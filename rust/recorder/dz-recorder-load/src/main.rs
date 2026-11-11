@@ -58,7 +58,10 @@ use dz_recorder_rows::{FileSink, RowSink};
 use thiserror::Error;
 
 use cli::{Args, CliError, Invocation, Mode};
+use dz_recorder_conformance::{ConformanceTool, PinnedRuleSet};
 use dz_recorder_load::config::{self, LoaderConfig};
+use dz_recorder_load::conformance::ledger::{JudgeLedger, JudgeLedgerError};
+use dz_recorder_load::conformance::stage::{record_judged, HeldJudgement, Judge, JudgedFeed};
 // The pass, the ledger and the metrics are the library's, because inline mode
 // needs them and a second copy of the ledger would be a second answer to
 // *is this loaded*. See `lib.rs`.
@@ -105,6 +108,16 @@ enum Failure {
     },
     #[error("{failed} object(s) could not be loaded; the first was: {first}")]
     Objects { failed: u64, first: String },
+    #[error("{0}")]
+    JudgeLedger(#[from] JudgeLedgerError),
+    #[error("conformance scratch {path}: {cause}")]
+    Scratch {
+        path: std::path::PathBuf,
+        #[source]
+        cause: std::io::Error,
+    },
+    #[error("[[conformance]] `{feed}`: {detail}")]
+    RuleSet { feed: String, detail: String },
 }
 
 fn main() -> ExitCode {
@@ -180,6 +193,33 @@ fn run(args: &Args) -> Result<(), Failure> {
             .statement("SELECT 1")
             .map_err(|e| Failure::Unreachable(e.to_string()))?;
         println!("destination answered: {}", probe.trim());
+        // Each rule set asked which one it is, as a pass would ask it. A tool
+        // that cannot say, or says something else, fails the check rather than
+        // judging nothing quietly once the unit is running.
+        for judged in &config.conformance {
+            let scratch = config
+                .loader
+                .conformance_scratch
+                .clone()
+                .unwrap_or_default();
+            let tool = judged.resolved_tool().map_err(|e| Failure::RuleSet {
+                feed: judged.feed.clone(),
+                detail: e.to_string(),
+            })?;
+            let pinned = PinnedRuleSet::resolve(
+                ConformanceTool::new(tool, scratch),
+                &judged.rule_set_version,
+            )
+            .map_err(|e| Failure::RuleSet {
+                feed: judged.feed.clone(),
+                detail: e.to_string(),
+            })?;
+            println!(
+                "conformance feed={} rule set answered {}",
+                judged.feed,
+                pinned.version()
+            );
+        }
         println!("configuration is valid");
         return Ok(());
     }
@@ -226,7 +266,23 @@ fn run(args: &Args) -> Result<(), Failure> {
             // question a dry run answers is what the rows would say, and a run
             // that marked the objects loaded would answer it exactly once.
             let mut ledger = Ledger::in_memory();
-            drive(args, &config, &metrics, &stop, &mut ledger, &mut sink)
+            // A sink of its own over the same directory: it writes only the
+            // findings file, which the load's sink never opens.
+            let mut conformance = conformance_of(&config, true, || {
+                FileSink::create(dir).map_err(|cause| Failure::DryRun {
+                    path: dir.clone(),
+                    source: cause,
+                })
+            })?;
+            drive(
+                args,
+                &config,
+                &metrics,
+                &stop,
+                &mut ledger,
+                &mut sink,
+                conformance.as_mut(),
+            )
         }
         None => {
             let mut sink = ClickHouseSink::over_http(config.clickhouse.clone());
@@ -236,19 +292,104 @@ fn run(args: &Args) -> Result<(), Failure> {
                 ledger.entries(),
                 if ledger.entries() == 1 { "y" } else { "ies" }
             );
-            drive(args, &config, &metrics, &stop, &mut ledger, &mut sink)
+            let mut conformance = conformance_of(&config, false, || {
+                Ok(ClickHouseSink::over_http(config.clickhouse.clone()))
+            })?;
+            drive(
+                args,
+                &config,
+                &metrics,
+                &stop,
+                &mut ledger,
+                &mut sink,
+                conformance.as_mut(),
+            )
         }
     }
 }
 
+/// The conformance runner's state, carried across passes. Exists only when a
+/// `[[conformance]]` entry names a feed.
+struct Conformance<S> {
+    feeds: Vec<JudgedFeed<ConformanceTool>>,
+    scratch: std::path::PathBuf,
+    ledger: JudgeLedger,
+    /// Its own: the objects a sink reports landed are what a ledger records,
+    /// and one sink shared with the load would report each one to both.
+    sink: S,
+    held: Vec<HeldJudgement>,
+    /// Failed attempts per object, so one that keeps failing is given up on
+    /// rather than retried first in its feed on every pass.
+    failures: std::collections::HashMap<dz_recorder_rows::ObjectId, u32>,
+}
+
+fn conformance_of<S>(
+    config: &LoaderConfig,
+    dry_run: bool,
+    sink: impl FnOnce() -> Result<S, Failure>,
+) -> Result<Option<Conformance<S>>, Failure> {
+    if config.conformance.is_empty() {
+        return Ok(None);
+    }
+    // `check` has already refused a configuration without these two.
+    let scratch = config
+        .loader
+        .conformance_scratch
+        .clone()
+        .unwrap_or_default();
+    std::fs::create_dir_all(&scratch).map_err(|cause| Failure::Scratch {
+        path: scratch.clone(),
+        cause,
+    })?;
+    let ledger = if dry_run {
+        JudgeLedger::in_memory()
+    } else {
+        let ledger =
+            JudgeLedger::open(config.loader.conformance_ledger.clone().unwrap_or_default())?;
+        eprintln!(
+            "dz-recorder-load: conformance resuming with {} ledger entr{}",
+            ledger.entries(),
+            if ledger.entries() == 1 { "y" } else { "ies" }
+        );
+        ledger
+    };
+    // The resolved path, so the file `check` looked at is the file that runs:
+    // a bare name handed to the process launcher is looked up on PATH.
+    let feeds = config
+        .conformance
+        .iter()
+        .map(|c| {
+            let tool = c.resolved_tool().map_err(|e| Failure::RuleSet {
+                feed: c.feed.clone(),
+                detail: e.to_string(),
+            })?;
+            Ok(JudgedFeed {
+                feed: c.feed.clone(),
+                rule_set_feed: c.rule_set_feed.clone(),
+                rule_set_version: c.rule_set_version.clone(),
+                rule_set: ConformanceTool::new(tool, &scratch),
+            })
+        })
+        .collect::<Result<Vec<_>, Failure>>()?;
+    Ok(Some(Conformance {
+        feeds,
+        scratch,
+        ledger,
+        sink: sink()?,
+        held: Vec::new(),
+        failures: std::collections::HashMap::new(),
+    }))
+}
+
 /// One pass, or every pass until a signal.
-fn drive<S: RowSink>(
+fn drive<S: RowSink, C: RowSink>(
     args: &Args,
     config: &LoaderConfig,
     metrics: &Arc<LoaderMetrics>,
     stop: &Arc<AtomicBool>,
     ledger: &mut Ledger,
     sink: &mut S,
+    mut conformance: Option<&mut Conformance<C>>,
 ) -> Result<(), Failure> {
     let stopping = {
         let stop = Arc::clone(stop);
@@ -312,6 +453,42 @@ fn drive<S: RowSink>(
             );
         }
 
+        // After the load, and only where a feed is judged. The two share the
+        // directory and nothing else.
+        if let Some(c) = conformance.as_deref_mut() {
+            let (judged, errors) = Judge {
+                objects_dir: &config.loader.objects_dir,
+                site: &config.loader.site,
+                recorder: &config.loader.recorder,
+                max_objects: config.loader.max_objects_per_pass,
+                feeds: &c.feeds,
+                scratch: &c.scratch,
+                ledger: &mut c.ledger,
+                sink: &mut c.sink,
+                metrics,
+                held: &mut c.held,
+                failures: &mut c.failures,
+            }
+            .run_once(&stopping);
+            for message in &errors {
+                eprintln!("dz-recorder-load: {message}");
+            }
+            failed += judged.failed;
+            if first_failure.is_none() {
+                first_failure = errors.first().cloned();
+            }
+            eprintln!(
+                "dz-recorder-load: conformance: judged {} object(s), recorded {}, failed {}; \
+                 {} unjudged of which {} held by the sink, oldest {}s behind",
+                judged.judged,
+                judged.recorded,
+                judged.failed,
+                judged.unjudged,
+                judged.held,
+                judged.oldest_unjudged_age_seconds
+            );
+        }
+
         if args.mode == Mode::Once || stopping() {
             break;
         }
@@ -363,6 +540,44 @@ fn drive<S: RowSink>(
             }
         }
     }
+    if let Some(c) = conformance {
+        match c.sink.flush(now_unix_nanos()) {
+            Ok(landed) => {
+                metrics.bytes_posted(landed.bytes_posted);
+                let mut errors = Vec::new();
+                // Every entry that could not be written is in `errors`, and is
+                // counted as a failure below, one per message.
+                let (recorded, _) = record_judged(
+                    &landed.objects,
+                    &mut c.held,
+                    &mut c.ledger,
+                    metrics,
+                    &mut errors,
+                );
+                if recorded > 0 {
+                    eprintln!(
+                        "dz-recorder-load: conformance: flushed {recorded} held judgement(s) on \
+                         the way out"
+                    );
+                }
+                for message in errors {
+                    eprintln!("dz-recorder-load: conformance ledger: {message}");
+                    failed += 1;
+                    if first_failure.is_none() {
+                        first_failure = Some(message);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("dz-recorder-load: conformance flush: {e}");
+                failed += 1;
+                if first_failure.is_none() {
+                    first_failure = Some(e.to_string());
+                }
+            }
+        }
+    }
+
     // A pass that could not load an object exits non-zero, so a timer's own
     // failure count is the same number an operator would get from the metrics.
     // The objects that did load stay loaded: this is a report, not a rollback.

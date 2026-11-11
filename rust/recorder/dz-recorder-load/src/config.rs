@@ -105,6 +105,87 @@ pub enum ConfigError {
          the entry that says it derives"
     )]
     DerivedFeedIsNotScanned(String),
+    #[error(
+        "[[conformance]] feed is required: an entry that names no feed turns judging on for \
+         nothing and reads as if it had turned it on for everything"
+    )]
+    NoJudgedFeed,
+    #[error(
+        "[[conformance]] feed `{0}` is padded with whitespace: it is matched against the \
+         manifest's exactly, so a padded one judges nothing and looks like a switch that is off"
+    )]
+    PaddedJudgedFeed(String),
+    #[error(
+        "[[conformance]] names `{0}` twice: which entry is in force — which tool, which rule \
+         set version — would be whichever the parser saw last"
+    )]
+    DuplicateJudgedFeed(String),
+    #[error(
+        "[[conformance]] feed `{0}` is not a name the recorder can have written: the runner \
+         judges the objects under completed/<feed>/, and a name outside the spec alphabet \
+         cannot be a directory there"
+    )]
+    JudgedFeedIsNotASpecName(String),
+    #[error(
+        "[[conformance]] feed `{0}` is not named in [loader] feeds, so the scan set says this \
+         host does not read that feed: name it there, or remove the entry that says it is judged"
+    )]
+    JudgedFeedIsNotScanned(String),
+    #[error(
+        "[[conformance]] `{0}`: rule_set_feed is required — the rule set's own name for the feed \
+         (its -feed), which is not the recorder's spec name and is not guessed from it"
+    )]
+    NoRuleSetFeed(String),
+    #[error(
+        "[[conformance]] `{0}`: tool is required and has no default. A runner that found the \
+         binary on PATH would stamp its verdicts with whatever rule set happened to be installed"
+    )]
+    NoTool(String),
+    #[error(
+        "[[conformance]] `{feed}`: tool `{path}` is not a file. Configured and absent is a \
+         refusal here rather than a feed that quietly judges nothing"
+    )]
+    ToolMissing { feed: String, path: PathBuf },
+    #[error(
+        "[[conformance]] `{feed}`: tool `{path}` is not an absolute path. A bare name is looked \
+         up on PATH when it is run, which is the search this key exists to forbid, and a relative \
+         one depends on the directory the loader was started in"
+    )]
+    ToolNotAbsolute { feed: String, path: PathBuf },
+    #[error("[[conformance]] `{feed}`: tool `{path}` is not executable")]
+    ToolNotExecutable { feed: String, path: PathBuf },
+    #[error(
+        "[[conformance]] `{feed}`: rule_set_version `{version}` names no commit. That is what an \
+         unstamped build answers, every unstamped build answers it alike, and verdicts filed \
+         under it cannot be told apart"
+    )]
+    RuleSetVersionUnstamped { feed: String, version: String },
+    #[error(
+        "[[conformance]] `{0}`: rule_set_version is required — the version the tool must answer \
+         with. It is checked against the tool, never stamped on a row in its place"
+    )]
+    NoRuleSetVersion(String),
+    #[error(
+        "[loader] conformance_ledger is required once any [[conformance]] feed is named: \
+         without it a restart re-judges everything still retained"
+    )]
+    NoConformanceLedger,
+    #[error(
+        "[loader] conformance_scratch is required once any [[conformance]] feed is named: \
+         every judged object is re-written there, uncompressed, for the rule set to read"
+    )]
+    NoConformanceScratch,
+    #[error(
+        "[loader] {key} `{path}` is inside objects_dir: a file the recorder's staging budget \
+         cannot classify, sitting beside the objects eviction has to reach, is a way to lose \
+         the archive"
+    )]
+    ConformancePathInObjects { key: &'static str, path: PathBuf },
+    #[error(
+        "[loader] conformance_ledger is the load ledger: the two answer different questions, and \
+         the boolean that guards datagram rows must not depend on whether a rule set was rebuilt"
+    )]
+    ConformanceLedgerIsTheLoadLedger,
 }
 
 /// One loader host's whole configuration.
@@ -127,6 +208,123 @@ pub struct LoaderConfig {
     /// turns on.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub market_data: Vec<MarketDataFeed>,
+    /// The feeds the conformance runner judges. Off, and off by absence.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conformance: Vec<ConformanceFeed>,
+}
+
+impl ConformanceFeed {
+    /// The tool's path, resolved: absolute, every link followed, and an
+    /// executable file. What the runner executes, so that the file checked here
+    /// is the file that runs.
+    ///
+    /// # Errors
+    ///
+    /// The path is empty, relative, missing, not a file or not executable.
+    pub fn resolved_tool(&self) -> Result<PathBuf, ConfigError> {
+        if self.tool.as_os_str().is_empty() {
+            return Err(ConfigError::NoTool(self.feed.clone()));
+        }
+        if !self.tool.is_absolute() {
+            return Err(ConfigError::ToolNotAbsolute {
+                feed: self.feed.clone(),
+                path: self.tool.clone(),
+            });
+        }
+        let missing = || ConfigError::ToolMissing {
+            feed: self.feed.clone(),
+            path: self.tool.clone(),
+        };
+        let resolved = std::fs::canonicalize(&self.tool).map_err(|_| missing())?;
+        let meta = std::fs::metadata(&resolved).map_err(|_| missing())?;
+        if !meta.is_file() {
+            return Err(missing());
+        }
+        if !is_executable(&meta) {
+            return Err(ConfigError::ToolNotExecutable {
+                feed: self.feed.clone(),
+                path: resolved,
+            });
+        }
+        Ok(resolved)
+    }
+}
+
+#[cfg(unix)]
+fn is_executable(meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    meta.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn is_executable(_meta: &std::fs::Metadata) -> bool {
+    true
+}
+
+/// Where a path leads, for comparing two of them.
+///
+/// Made absolute against the working directory, its longest existing ancestor
+/// resolved through every link, and the rest — which does not exist yet —
+/// appended with `.` and `..` folded. Two spellings of one file compare equal,
+/// and a path that reaches into a directory through a link is seen to be in it.
+fn destination(path: &std::path::Path) -> PathBuf {
+    use std::path::Component;
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(path)
+    };
+    let mut folded = PathBuf::new();
+    for part in absolute.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                folded.pop();
+            }
+            other => folded.push(other.as_os_str()),
+        }
+    }
+    let mut existing = folded.clone();
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if let Ok(resolved) = std::fs::canonicalize(&existing) {
+            let mut out = resolved;
+            for part in rest.iter().rev() {
+                out.push(part);
+            }
+            return out;
+        }
+        match (
+            existing.file_name().map(ToOwned::to_owned),
+            existing.parent(),
+        ) {
+            (Some(name), Some(parent)) => {
+                rest.push(name);
+                existing = parent.to_path_buf();
+            }
+            _ => return folded,
+        }
+    }
+}
+
+/// One feed the specification's rule set is run over.
+///
+/// Every key is required and none has a default: a feed judged with a guessed
+/// tool, a guessed rule set name or an unstated version is a feed whose
+/// verdicts nobody can attribute.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConformanceFeed {
+    /// The manifest's `feed`, matched exactly, which is also the subdirectory
+    /// of `objects_dir` the recorder writes it under.
+    pub feed: String,
+    /// The rule set's own name for the feed, as its `-feed` takes it.
+    pub rule_set_feed: String,
+    /// The `dz-conformance` binary. Stated, never searched for.
+    pub tool: PathBuf,
+    /// What the tool must answer `--version` with. Every pass asks it, and a
+    /// tool that answers anything else judges nothing that pass.
+    pub rule_set_version: String,
 }
 
 /// One feed's derivation, and the two things it cannot be guessed.
@@ -236,6 +434,14 @@ pub struct Loader {
     /// that coalesces: a pass may derive sixty objects and load none, and a
     /// bound on the loading would not have bounded that pass at all.
     pub max_objects_per_pass: usize,
+    /// What the conformance runner has judged, keyed on the rule set version.
+    /// A file of its own, never the load ledger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conformance_ledger: Option<PathBuf>,
+    /// Where each judged object is re-written for the rule set to read. The
+    /// runner's own writable path, never inside `objects_dir`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conformance_scratch: Option<PathBuf>,
 }
 
 impl Default for Loader {
@@ -248,6 +454,8 @@ impl Default for Loader {
             ledger: PathBuf::new(),
             poll_interval: Duration::from_secs(30),
             max_objects_per_pass: 0,
+            conformance_ledger: None,
+            conformance_scratch: None,
         }
     }
 }
@@ -359,7 +567,76 @@ impl LoaderConfig {
         // derivation name would otherwise fail here, as a feed the scan set
         // does not carry, and the message would describe the wrong mistake.
         self.check_feeds()?;
+        self.check_conformance()?;
         self.clickhouse.check()?;
+        Ok(())
+    }
+
+    /// The conformance switches. Every entry names a feed once, a tool that is
+    /// there and a version to hold it to; and once any is named, the runner's
+    /// two paths are required and kept out of the recorder's directories.
+    fn check_conformance(&self) -> Result<(), ConfigError> {
+        let names: Vec<String> = self.conformance.iter().map(|c| c.feed.clone()).collect();
+        for (index, judged) in self.conformance.iter().enumerate() {
+            check_feed_name(&judged.feed, &names[..index]).map_err(|kind| match kind {
+                FeedNameError::Empty => ConfigError::NoJudgedFeed,
+                FeedNameError::Padded => ConfigError::PaddedJudgedFeed(judged.feed.clone()),
+                FeedNameError::Duplicate => ConfigError::DuplicateJudgedFeed(judged.feed.clone()),
+            })?;
+            if !is_spec_name(&judged.feed) {
+                return Err(ConfigError::JudgedFeedIsNotASpecName(judged.feed.clone()));
+            }
+            if let Some(feeds) = &self.loader.feeds {
+                if !feeds.iter().any(|f| f == &judged.feed) {
+                    return Err(ConfigError::JudgedFeedIsNotScanned(judged.feed.clone()));
+                }
+            }
+            if judged.rule_set_feed.trim().is_empty() {
+                return Err(ConfigError::NoRuleSetFeed(judged.feed.clone()));
+            }
+            judged.resolved_tool()?;
+            if judged.rule_set_version.trim().is_empty() {
+                return Err(ConfigError::NoRuleSetVersion(judged.feed.clone()));
+            }
+            if !dz_recorder_conformance::is_stamped(&judged.rule_set_version) {
+                return Err(ConfigError::RuleSetVersionUnstamped {
+                    feed: judged.feed.clone(),
+                    version: judged.rule_set_version.clone(),
+                });
+            }
+        }
+        if self.conformance.is_empty() {
+            return Ok(());
+        }
+        let ledger = self
+            .loader
+            .conformance_ledger
+            .as_ref()
+            .filter(|p| !p.as_os_str().is_empty())
+            .ok_or(ConfigError::NoConformanceLedger)?;
+        let scratch = self
+            .loader
+            .conformance_scratch
+            .as_ref()
+            .filter(|p| !p.as_os_str().is_empty())
+            .ok_or(ConfigError::NoConformanceScratch)?;
+        // Where each path leads, not how it is spelled: `a/../a/ledger.jsonl`
+        // is `a/ledger.jsonl`, and a link into the objects directory is in it.
+        if destination(ledger) == destination(&self.loader.ledger) {
+            return Err(ConfigError::ConformanceLedgerIsTheLoadLedger);
+        }
+        let objects = destination(&self.loader.objects_dir);
+        for (key, path) in [
+            ("conformance_ledger", ledger),
+            ("conformance_scratch", scratch),
+        ] {
+            if destination(path).starts_with(&objects) {
+                return Err(ConfigError::ConformancePathInObjects {
+                    key,
+                    path: path.clone(),
+                });
+            }
+        }
         Ok(())
     }
 
@@ -488,6 +765,28 @@ impl LoaderConfig {
         // absence of a line is the statement: derivation is off by default, and
         // an operator reading this back is reading which feeds pay for it and at
         // what Magic rather than which feeds they meant to name.
+        for judged in &self.conformance {
+            let _ = writeln!(
+                out,
+                "conformance feed={} rule_set_feed={} tool={} rule_set_version={}",
+                judged.feed,
+                judged.rule_set_feed,
+                judged.tool.display(),
+                judged.rule_set_version
+            );
+        }
+        if !self.conformance.is_empty() {
+            let shown = |p: &Option<PathBuf>| {
+                p.as_ref()
+                    .map_or_else(|| "(none)".to_owned(), |p| p.display().to_string())
+            };
+            let _ = writeln!(
+                out,
+                "conformance_ledger={} conformance_scratch={}",
+                shown(&self.loader.conformance_ledger),
+                shown(&self.loader.conformance_scratch)
+            );
+        }
         for derived in &self.market_data {
             let _ = writeln!(
                 out,
@@ -963,5 +1262,273 @@ persist_snapshot_levels = true
         let dir = tempfile::tempdir().expect("a temporary directory");
         let config = config_with_objects_dir(dir.path());
         assert!(config.feeds_without_a_directory().is_empty());
+    }
+
+    /// A configuration with a `[[conformance]]` entry whose tool is a real
+    /// file, and the runner's two paths outside `objects_dir`.
+    fn judging(dir: &std::path::Path, extra_entry: &str) -> (LoaderConfig, String) {
+        let objects = dir.join("objects");
+        std::fs::create_dir_all(&objects).expect("objects");
+        let tool = dir.join("dz-conformance");
+        std::fs::write(&tool, "#!/bin/sh\n").expect("a stand-in tool");
+        set_mode(&tool, 0o755);
+        let text = VALID
+            .replace("OBJECTS", &objects.display().to_string())
+            .replace(
+                "poll_interval = 30",
+                &format!(
+                    "poll_interval = 30\nconformance_ledger = \"{}\"\nconformance_scratch = \"{}\"",
+                    dir.join("judged.jsonl").display(),
+                    dir.join("scratch").display()
+                ),
+            )
+            + &format!(
+                "\n[[conformance]]\nfeed = \"top-of-book\"\nrule_set_feed = \"tob\"\ntool = \"{}\"\nrule_set_version = \"v1+abc\"\n{extra_entry}",
+                tool.display()
+            );
+        (
+            LoaderConfig::parse(&text).expect("the fixture parses"),
+            text,
+        )
+    }
+
+    /// Shipped off: no section, no judging, and no line saying so.
+    #[test]
+    fn a_configuration_that_says_nothing_judges_nothing() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let config = config_with_objects_dir(dir.path());
+        config.check().expect("valid");
+        assert!(config.conformance.is_empty(), "off, and off by absence");
+        assert!(
+            !config.summary().contains("conformance"),
+            "no line, because there is nothing to say: {}",
+            config.summary()
+        );
+        assert!(config.loader.conformance_ledger.is_none());
+    }
+
+    #[test]
+    fn a_judged_feed_checks_out_and_is_said_back() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let (config, _) = judging(dir.path(), "");
+        config.check().expect("valid");
+        let summary = config.summary();
+        assert!(
+            summary.contains("conformance feed=top-of-book rule_set_feed=tob tool="),
+            "{summary}"
+        );
+        assert!(summary.contains("rule_set_version=v1+abc"), "{summary}");
+        assert!(summary.contains("conformance_ledger="), "{summary}");
+    }
+
+    /// The tool's path is required, with no default to fall back on.
+    #[test]
+    fn a_missing_tool_is_refused_and_never_defaulted() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let (_, text) = judging(dir.path(), "");
+        let without: String = text
+            .lines()
+            .filter(|l| !l.starts_with("tool = "))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let error = LoaderConfig::parse(&without).expect_err("no tool, no entry");
+        assert!(error.to_string().contains("tool"), "{error}");
+
+        let (mut config, _) = judging(dir.path(), "");
+        config.conformance[0].tool = dir.path().join("not-here");
+        assert!(matches!(
+            config.check(),
+            Err(ConfigError::ToolMissing { .. })
+        ));
+        config.conformance[0].tool = PathBuf::new();
+        assert!(matches!(config.check(), Err(ConfigError::NoTool(_))));
+    }
+
+    #[test]
+    fn a_misspelled_key_in_the_section_is_refused_rather_than_defaulted() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let (_, text) = judging(dir.path(), "");
+        let error = LoaderConfig::parse(&text.replace("rule_set_version", "ruleset_version"))
+            .expect_err("an unknown key is refused");
+        assert!(error.to_string().contains("ruleset_version"), "{error}");
+    }
+
+    #[test]
+    fn a_feed_judged_twice_is_refused() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let (mut config, _) = judging(dir.path(), "");
+        let again = config.conformance[0].clone();
+        config.conformance.push(again);
+        assert!(matches!(
+            config.check(),
+            Err(ConfigError::DuplicateJudgedFeed(_))
+        ));
+    }
+
+    #[test]
+    fn every_entry_states_its_rule_set_and_its_version() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let (mut config, _) = judging(dir.path(), "");
+        config.conformance[0].rule_set_version = " ".to_owned();
+        assert!(matches!(
+            config.check(),
+            Err(ConfigError::NoRuleSetVersion(_))
+        ));
+        let (mut config, _) = judging(dir.path(), "");
+        config.conformance[0].rule_set_feed = String::new();
+        assert!(matches!(config.check(), Err(ConfigError::NoRuleSetFeed(_))));
+        let (mut config, _) = judging(dir.path(), "");
+        config.conformance[0].feed = "../escape".to_owned();
+        assert!(matches!(
+            config.check(),
+            Err(ConfigError::JudgedFeedIsNotASpecName(_))
+        ));
+    }
+
+    /// The runner's paths are its own: required, outside the recorder's
+    /// directory, and never the load ledger.
+    #[test]
+    fn the_runners_paths_are_required_and_kept_out_of_the_archive() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let (mut config, _) = judging(dir.path(), "");
+        config.loader.conformance_ledger = None;
+        assert!(matches!(
+            config.check(),
+            Err(ConfigError::NoConformanceLedger)
+        ));
+
+        let (mut config, _) = judging(dir.path(), "");
+        config.loader.conformance_scratch = None;
+        assert!(matches!(
+            config.check(),
+            Err(ConfigError::NoConformanceScratch)
+        ));
+
+        let (mut config, _) = judging(dir.path(), "");
+        config.loader.conformance_scratch = Some(config.loader.objects_dir.join("scratch"));
+        assert!(matches!(
+            config.check(),
+            Err(ConfigError::ConformancePathInObjects {
+                key: "conformance_scratch",
+                ..
+            })
+        ));
+
+        let (mut config, _) = judging(dir.path(), "");
+        config.loader.conformance_ledger = Some(config.loader.ledger.clone());
+        assert!(matches!(
+            config.check(),
+            Err(ConfigError::ConformanceLedgerIsTheLoadLedger)
+        ));
+    }
+
+    #[test]
+    fn a_judged_feed_the_scan_set_omits_is_refused() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let (mut config, _) = judging(dir.path(), "");
+        config.loader.feeds = Some(vec!["market-by-price".to_owned()]);
+        assert!(matches!(
+            config.check(),
+            Err(ConfigError::JudgedFeedIsNotScanned(_))
+        ));
+        config.loader.feeds = Some(vec!["top-of-book".to_owned()]);
+        config.check().expect("named in the scan set");
+    }
+
+    fn set_mode(path: &std::path::Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("chmod");
+    }
+
+    /// A bare or relative tool path passes a file check against the working
+    /// directory and is then looked up on PATH when run, so a different binary
+    /// can run from the one that was checked. Refused; and the path the runner
+    /// is handed is the resolved one.
+    #[test]
+    fn a_tool_path_must_be_absolute_and_executable_and_is_run_as_resolved() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let (mut config, _) = judging(dir.path(), "");
+        let cwd = std::env::current_dir().expect("a working directory");
+        let local = cwd.join("target-dz-conformance-test-stand-in");
+        std::fs::write(&local, "#!/bin/sh\n").expect("a file in the working directory");
+        set_mode(&local, 0o755);
+        config.conformance[0].tool = PathBuf::from("target-dz-conformance-test-stand-in");
+        let refused = config.check();
+        let _ = std::fs::remove_file(&local);
+        assert!(
+            matches!(refused, Err(ConfigError::ToolNotAbsolute { .. })),
+            "{refused:?}"
+        );
+
+        let (config, _) = judging(dir.path(), "");
+        set_mode(&config.conformance[0].tool, 0o644);
+        assert!(matches!(
+            config.check(),
+            Err(ConfigError::ToolNotExecutable { .. })
+        ));
+
+        // Reached through a link and a `..`: what runs is the file itself.
+        let (mut config, _) = judging(dir.path(), "");
+        let real = config.conformance[0].tool.clone();
+        let link = dir.path().join("linked-tool");
+        std::os::unix::fs::symlink(&real, &link).expect("a link");
+        config.conformance[0].tool = dir.path().join("objects").join("..").join("linked-tool");
+        config.check().expect("valid");
+        assert_eq!(
+            config.conformance[0].resolved_tool().expect("resolved"),
+            std::fs::canonicalize(&real).expect("canonical")
+        );
+    }
+
+    /// An unstamped build answers `dev+none`, as does every other; a pin to it
+    /// would let unrelated builds write under one version.
+    #[test]
+    fn an_unstamped_rule_set_version_is_refused() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        for unstamped in ["dev+none", "0.4.2+none", "0.4.2+", "0.4.2"] {
+            let (mut config, _) = judging(dir.path(), "");
+            config.conformance[0].rule_set_version = unstamped.to_owned();
+            assert!(
+                matches!(
+                    config.check(),
+                    Err(ConfigError::RuleSetVersionUnstamped { .. })
+                ),
+                "{unstamped}"
+            );
+        }
+    }
+
+    /// Two spellings of one file are one file, and a link into the objects
+    /// directory is inside it.
+    #[test]
+    fn the_runners_paths_are_compared_by_where_they_lead() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let (mut config, _) = judging(dir.path(), "");
+        let ledger = dir.path().join("state").join("ledger.jsonl");
+        std::fs::create_dir_all(ledger.parent().expect("a parent")).expect("state");
+        config.loader.ledger = ledger;
+        config.loader.conformance_ledger = Some(
+            dir.path()
+                .join("state")
+                .join("..")
+                .join("state")
+                .join("ledger.jsonl"),
+        );
+        assert!(matches!(
+            config.check(),
+            Err(ConfigError::ConformanceLedgerIsTheLoadLedger)
+        ));
+
+        let (mut config, _) = judging(dir.path(), "");
+        let link = dir.path().join("looks-elsewhere");
+        std::os::unix::fs::symlink(&config.loader.objects_dir, &link).expect("a link");
+        config.loader.conformance_scratch = Some(link.join("scratch"));
+        assert!(matches!(
+            config.check(),
+            Err(ConfigError::ConformancePathInObjects {
+                key: "conformance_scratch",
+                ..
+            })
+        ));
     }
 }
