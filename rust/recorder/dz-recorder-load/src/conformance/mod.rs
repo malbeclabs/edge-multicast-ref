@@ -90,9 +90,10 @@ impl ConformanceRefusal {
 /// Which verdicts become `conformance_finding` rows.
 ///
 /// The table has no TTL, and a row for every rule on every instance of every
-/// object is mostly passes. By default only violations are written: the judge
-/// ledger, not the table, records that an object was judged, so an object with
-/// no row was judged and had no violation.
+/// object is mostly passes. By default only violations are written. An object
+/// with no row was then either not judged, or judged with no verdict left a
+/// violation; an unverifiable or `na` verdict writes no row. The judge ledger,
+/// not the table, records which objects were judged.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum KeptVerdicts {

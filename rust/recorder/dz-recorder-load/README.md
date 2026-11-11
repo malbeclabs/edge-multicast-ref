@@ -407,8 +407,10 @@ it would stop at is the one closest to eviction.
 A `[[conformance]]` entry runs the specification's rule set over every object
 of that feed and writes `conformance_finding` (see `loader.example.toml`). By
 default only `violation` rows are written; `verdicts = "all"` writes every
-verdict. Without passes, an object with no row was judged clean or not judged
-at all, and only the conformance ledger on this host tells the two apart. The
+verdict. Without passes, an object with no row was either not judged, or
+judged with no verdict left a violation, which is not proof that it is clean: an
+unverifiable or `na` verdict writes no row either. Only the conformance ledger
+on this host says which objects were judged. The
 design, and what writing only violations gives up, is in
 `docs/superpowers/specs/2026-09-06-recorder-conformance-runner-design.md`.
 

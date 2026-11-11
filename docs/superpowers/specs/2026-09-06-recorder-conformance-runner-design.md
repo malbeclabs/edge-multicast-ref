@@ -302,8 +302,9 @@ rows. The table has no TTL, and passes for every rule on every instance of every
 object are most of its volume. The cost is the one stated above, and it is
 accepted for those feeds:
 
-- An object with no row was judged and had no violation, or was not judged at
-  all. The judge ledger tells the two apart, and it is a file on the loader's
+- An object with no row was either not judged, or judged with no verdict left
+  a violation. That is not a clean result: an unverifiable or `na` verdict,
+  including a violation a hole downgraded, writes no row either. The judge ledger tells the two apart, and it is a file on the loader's
   host, not a table. A reader of `conformance_finding` alone cannot.
 - The *`unverifiable` share* panel has no denominator, and no unverifiable row
   either, on a feed that writes only violations.
