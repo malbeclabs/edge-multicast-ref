@@ -44,20 +44,26 @@ use std::path::PathBuf;
 
 use super::{port_of, Recorded, ALL_ROLES, GROUP};
 use dz_recorder_conformance::segment::{write_group_segments, SectionProvenance};
-use dz_recorder_conformance::tool::{ConformanceTool, Invocation, PortRoles};
+use dz_recorder_conformance::tool::{
+    ConformanceTool, Invocation, PinnedRuleSet, PortRoles, RuleSet,
+};
+use dz_recorder_load::conformance::judge::{judge_object, JudgeInput};
 use dz_recorder_replay::{ArchiveSource, OwnedDatagram, Termination};
+use dz_recorder_rows::{ConformanceFinding, FileSink, Grain, RowSink};
 
-/// Where the tool is. Set by whatever runs the suite, because it is built from
-/// a sibling repository this one does not vendor.
+/// Where the tool is. Set by whatever runs the suite, because it is released
+/// from a sibling repository this one does not vendor.
 const TOOL_ENV: &str = "DZ_CONFORMANCE_BIN";
 
 fn tool() -> PathBuf {
     let path = std::env::var(TOOL_ENV).unwrap_or_else(|_| {
         panic!(
             "{TOOL_ENV} is unset. This suite validates the archive against \
-             edge-feed-spec's dz-conformance, which lives in that repository: build it with \
-             `go build -o <path> ./tools/conformance` and point {TOOL_ENV} at the result. \
-             Skipping instead would report a clean feed for a stream nobody checked."
+             edge-feed-spec's dz-conformance, which lives in that repository: download a \
+             release of it (the one `.github/workflows/rust-codec.yml` pins) and point \
+             {TOOL_ENV} at the binary. A build of the source answers `dev+none` unless it is \
+             stamped, and the runner refuses it. Skipping instead would report a clean feed \
+             for a stream nobody checked."
         )
     });
     let path = PathBuf::from(path);
@@ -205,4 +211,58 @@ fn judged(
         },
         report,
     )
+}
+
+/// The archive judged by the runner, and the `conformance_finding` rows it
+/// wrote, read back from a `FileSink`.
+///
+/// The runner's own path end to end: digest, replay, the bridge, the tool's
+/// rule report, placement and the absence downgrade. Pinned to whatever rule
+/// set the tool says it is, so a build that names no commit is refused here as
+/// it is by the loader.
+pub fn findings_of(archive: &Recorded, feed: &str) -> Findings {
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let tool = ConformanceTool::new(tool(), scratch.path());
+    let version = tool
+        .rule_set_version()
+        .unwrap_or_else(|e| panic!("the tool cannot say which rule set it is: {e}"));
+    let pinned = PinnedRuleSet::resolve(tool, &version)
+        .unwrap_or_else(|e| panic!("the tool's own answer does not pin it: {e}"));
+    let judged = judge_object(&JudgeInput {
+        object: &archive.object,
+        manifest: &archive.manifest,
+        rule_set: &pinned,
+        rule_set_feed: feed,
+        scratch: scratch.path(),
+        run_ts: 1,
+    })
+    .unwrap_or_else(|e| panic!("the runner judged nothing: {e}"));
+
+    let rows_dir = scratch.path().join("rows");
+    let mut sink = FileSink::create(&rows_dir).expect("a file sink");
+    sink.write_batch(judged.batch, 0)
+        .expect("the rows are written");
+    sink.flush(0).expect("and flushed");
+    let path = sink.path(Grain::ConformanceFinding);
+    let rows = std::fs::read_to_string(&path)
+        .unwrap_or_default()
+        .lines()
+        .map(|line| {
+            serde_json::from_str(line).unwrap_or_else(|e| panic!("not a finding row: {e}: {line}"))
+        })
+        .collect();
+    Findings {
+        rows,
+        version,
+        refused: judged.refused.total(),
+    }
+}
+
+/// What the runner wrote for one object.
+pub struct Findings {
+    pub rows: Vec<ConformanceFinding>,
+    /// What the tool answered to `--version`, which every row is stamped with.
+    pub version: String,
+    /// Stated verdicts the runner could not place.
+    pub refused: u64,
 }

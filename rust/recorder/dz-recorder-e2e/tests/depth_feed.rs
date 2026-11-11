@@ -30,6 +30,12 @@ use dz_edge_mbp::{
 };
 use dz_edge_refdata::{InstrumentDefinition, ManifestSummary};
 use dz_recorder_replay::OwnedDatagram;
+#[cfg(feature = "conformance")]
+use {
+    dz_recorder_replay::synthetic::StarvationWindow,
+    dz_recorder_rows::{ConformanceFinding, FindingVerdict, Nanos, PortRoleLabel},
+    std::net::Ipv4Addr,
+};
 
 const MKTDATA_CHANNEL: u8 = 11;
 const REFDATA_CHANNEL: u8 = 12;
@@ -357,6 +363,78 @@ fn what_the_publisher_wrote_and_the_recorder_kept_is_valid_by_the_spec() {
     common::conformance::conformance_of(&archive, "mbp").assert_clean();
 }
 
+/// The stream the specification warns about by name: a removal carrying an
+/// Action other than Delete. It is self-consistent, so every other test in this
+/// file passes it.
+///
+/// The Change that carries zero is last, behind two that carry a quantity, so a
+/// starvation window can take the one in the middle and leave a hole the
+/// violation's evidence starts right after.
+#[cfg(feature = "conformance")]
+fn zero_quantity_change() -> Vec<OwnedDatagram> {
+    let mut wire = Wire::new();
+    let mut mktdata = fresh(MKTDATA_CHANNEL);
+    for (price, qty) in [
+        (10_000_500_i64, 7_250_u64),
+        (10_000_500, 7_000),
+        (10_000_500, 0),
+    ] {
+        let seq = u32::try_from(mktdata.sequence_number()).expect("a small test sequence");
+        let mut update = level_update(seq, price, qty, SIDE_ASK);
+        update.action = ACTION_CHANGE; // the last is a Change carrying zero
+        let payload = datagram(mktdata, PortRole::Mktdata, |b| {
+            b.push(&update).expect("the encoder does not judge Action");
+        });
+        wire.arrive(payload, PUBLISHER_A, PortRole::Mktdata);
+        mktdata.advance();
+    }
+    wire.sent
+}
+
+/// A snapshot cycle whose level claims to belong to a different snapshot than
+/// the one it opened, behind two well-formed cycles.
+///
+/// The violation is structural: the Begin is in the same datagram as the level
+/// that contradicts it, so no lost datagram stands between them. The cycles in
+/// front of it are there for the same reason as the Changes above, so a
+/// starvation window has something on either side of it.
+#[cfg(feature = "conformance")]
+fn malformed_snapshot() -> Vec<OwnedDatagram> {
+    let mut wire = Wire::new();
+    let mut snapshot = fresh(SNAPSHOT_CHANNEL);
+    for (snapshot_id, level_snapshot_id) in [
+        (SNAPSHOT_ID, SNAPSHOT_ID),
+        (SNAPSHOT_ID + 1, SNAPSHOT_ID + 1),
+        // belongs to no open group
+        (SNAPSHOT_ID + 2, SNAPSHOT_ID + 3),
+    ] {
+        let payload = datagram(snapshot, PortRole::Snapshot, |b| {
+            b.push(&SnapshotBegin {
+                instrument_id: INSTRUMENT,
+                anchor_seq: ANCHOR_SEQ,
+                total_levels: 1,
+                snapshot_id,
+                last_instrument_seq: 4,
+                timestamp_ns: 1_772_000_000_000_000_300,
+                depth_bound: 50,
+            })
+            .expect("the encoder does not judge a group");
+            let mut level = snapshot_level(9_999_500, 12_500, SIDE_BID);
+            level.snapshot_id = level_snapshot_id;
+            b.push(&level).expect("nor does it judge a level's id");
+            b.push(&SnapshotEnd {
+                instrument_id: INSTRUMENT,
+                anchor_seq: ANCHOR_SEQ,
+                snapshot_id,
+            })
+            .expect("and the end closes it");
+        });
+        wire.arrive(payload, PUBLISHER_A, PortRole::Snapshot);
+        snapshot.advance();
+    }
+    wire.sent
+}
+
 #[cfg(feature = "conformance")]
 #[test]
 fn the_conformance_gate_fails_a_stream_the_spec_forbids() {
@@ -365,24 +443,7 @@ fn the_conformance_gate_fails_a_stream_the_spec_forbids() {
     // nothing*. A tool pointed at the wrong ports, or one that could not parse
     // the pcap at all, would find no violations either — and would report a
     // clean feed for a stream nobody checked.
-    //
-    // The violation is the one the specification warns about by name: a removal
-    // carrying an Action other than Delete. It is self-consistent, so every
-    // other test in this file passes it.
-    let mut wire = Wire::new();
-    let mut mktdata = fresh(MKTDATA_CHANNEL);
-    for (price, qty) in [(10_000_500_i64, 7_250_u64), (10_000_500, 0)] {
-        let seq = u32::try_from(mktdata.sequence_number()).expect("a small test sequence");
-        let mut update = level_update(seq, price, qty, SIDE_ASK);
-        update.action = ACTION_CHANGE; // a Change carrying zero
-        let payload = datagram(mktdata, PortRole::Mktdata, |b| {
-            b.push(&update).expect("the encoder does not judge Action");
-        });
-        wire.arrive(payload, PUBLISHER_A, PortRole::Mktdata);
-        mktdata.advance();
-    }
-
-    let archive = record(&wire.sent, ALL_ROLES);
+    let archive = record(&zero_quantity_change(), ALL_ROLES);
     let verdict = common::conformance::conformance_of(&archive, "mbp");
     assert_eq!(
         verdict.code, 1,
@@ -405,36 +466,7 @@ fn the_conformance_gate_fails_a_snapshot_the_spec_forbids() {
     // set but wrong evaluates zero snapshot frames and still exits 0, because
     // the tool warns about a starved rule only when the flag is unset. This one
     // proves the snapshot port is reaching the rule set.
-    //
-    // The violation is structural and loss cannot explain it: the Begin is
-    // present in the same stream, and a level claims to belong to a different
-    // snapshot than the one it opened.
-    let mut wire = Wire::new();
-    let snapshot = fresh(SNAPSHOT_CHANNEL);
-    let payload = datagram(snapshot, PortRole::Snapshot, |b| {
-        b.push(&SnapshotBegin {
-            instrument_id: INSTRUMENT,
-            anchor_seq: ANCHOR_SEQ,
-            total_levels: 1,
-            snapshot_id: SNAPSHOT_ID,
-            last_instrument_seq: 4,
-            timestamp_ns: 1_772_000_000_000_000_300,
-            depth_bound: 50,
-        })
-        .expect("the encoder does not judge a group");
-        let mut level = snapshot_level(9_999_500, 12_500, SIDE_BID);
-        level.snapshot_id = SNAPSHOT_ID + 1; // belongs to no open group
-        b.push(&level).expect("nor does it judge a level's id");
-        b.push(&SnapshotEnd {
-            instrument_id: INSTRUMENT,
-            anchor_seq: ANCHOR_SEQ,
-            snapshot_id: SNAPSHOT_ID,
-        })
-        .expect("and the end closes it");
-    });
-    wire.arrive(payload, PUBLISHER_A, PortRole::Snapshot);
-
-    let archive = record(&wire.sent, ALL_ROLES);
+    let archive = record(&malformed_snapshot(), ALL_ROLES);
     let verdict = common::conformance::conformance_of(&archive, "mbp");
     assert_eq!(
         verdict.code, 1,
@@ -445,5 +477,138 @@ fn the_conformance_gate_fails_a_snapshot_the_spec_forbids() {
         verdict.stderr.contains("MBP.SNAP.GROUP_STRUCTURE"),
         "and it has to be the rule this snapshot breaks:\n{}",
         verdict.stderr
+    );
+}
+
+/// The rows the runner wrote over one recorded stream, with what every row
+/// shares asserted once.
+#[cfg(feature = "conformance")]
+fn findings(sent: &[OwnedDatagram]) -> Vec<ConformanceFinding> {
+    let archive = record(sent, ALL_ROLES);
+    let findings = common::conformance::findings_of(&archive, "mbp");
+    assert_eq!(findings.refused, 0, "every stated verdict was placed");
+    for row in &findings.rows {
+        assert_eq!(row.rule_set_version, findings.version);
+        assert_eq!(row.object_key, archive.manifest.object_key);
+        assert_eq!(row.feed, archive.manifest.feed);
+        assert_eq!(row.window_start, Nanos(archive.manifest.start_ns));
+        assert_eq!(row.window_end, Nanos(archive.manifest.end_ns));
+    }
+    findings.rows
+}
+
+/// The one row the runner wrote for `rule_id`.
+#[cfg(feature = "conformance")]
+fn row_for<'a>(rows: &'a [ConformanceFinding], rule_id: &str) -> &'a ConformanceFinding {
+    let mut matching = rows.iter().filter(|r| r.rule_id == rule_id);
+    let row = matching
+        .next()
+        .unwrap_or_else(|| panic!("no {rule_id} row among {rows:#?}"));
+    assert!(matching.next().is_none(), "one {rule_id} row: {rows:#?}");
+    row
+}
+
+#[cfg(feature = "conformance")]
+fn violations(rows: &[ConformanceFinding]) -> Vec<&str> {
+    rows.iter()
+        .filter(|r| r.verdict == FindingVerdict::Violation)
+        .map(|r| r.rule_id.as_str())
+        .collect()
+}
+
+#[cfg(feature = "conformance")]
+#[test]
+fn the_runner_writes_the_violation_a_stream_breaks_as_a_row() {
+    // The gate above as the runner sees it: not an exit code but a row, on the
+    // instance the Change came from, at the sequence number that carried zero.
+    let rows = findings(&zero_quantity_change());
+    assert_eq!(
+        violations(&rows),
+        vec!["MBP.DELTA.ABSOLUTE_APPLY"],
+        "{rows:#?}"
+    );
+    let row = row_for(&rows, "MBP.DELTA.ABSOLUTE_APPLY");
+    assert_eq!(row.port_role, PortRoleLabel::Mktdata);
+    assert_eq!(
+        (row.source_addr, row.channel_id, row.dst_port),
+        (PUBLISHER_A, MKTDATA_CHANNEL, port_of(PortRole::Mktdata))
+    );
+    assert_eq!((row.first_seq, row.last_seq), (2, 2), "{row:#?}");
+}
+
+#[cfg(feature = "conformance")]
+#[test]
+fn the_runner_writes_the_violation_a_snapshot_breaks_as_a_row() {
+    // A snapshot group is state every path of the channel fills, so the rule
+    // set names the channel and not one publisher: the row is at channel grain.
+    let rows = findings(&malformed_snapshot());
+    assert_eq!(
+        violations(&rows),
+        vec!["MBP.SNAP.GROUP_STRUCTURE"],
+        "{rows:#?}"
+    );
+    let row = row_for(&rows, "MBP.SNAP.GROUP_STRUCTURE");
+    assert_eq!(row.port_role, PortRoleLabel::Snapshot);
+    assert_eq!(
+        (row.source_addr, row.channel_id, row.dst_port),
+        (
+            Ipv4Addr::UNSPECIFIED,
+            SNAPSHOT_CHANNEL,
+            port_of(PortRole::Snapshot)
+        )
+    );
+    assert_eq!((row.first_seq, row.last_seq), (0, 0), "{row:#?}");
+}
+
+/// The datagram in front of each violation, lost by the recorder.
+#[cfg(feature = "conformance")]
+const BEFORE_THE_VIOLATION: StarvationWindow = StarvationWindow { first: 1, count: 1 };
+
+#[cfg(feature = "conformance")]
+#[test]
+fn a_violation_whose_evidence_our_own_hole_touches_is_unverifiable() {
+    // The same stream, recorded through a starvation window that took the
+    // datagram before the Change carrying zero. The violation is still in the
+    // archive, and the rule set still states it — but its evidence starts
+    // right after a hole the recorder admits to, so it is not a row this
+    // runner may charge to the publisher.
+    let rows = findings(&common::starved(
+        &zero_quantity_change(),
+        BEFORE_THE_VIOLATION,
+    ));
+    assert!(violations(&rows).is_empty(), "{rows:#?}");
+    let row = row_for(&rows, "MBP.DELTA.ABSOLUTE_APPLY");
+    assert_eq!(row.verdict, FindingVerdict::Unverifiable, "{row:#?}");
+    assert_eq!(
+        (row.source_addr, row.channel_id, row.dst_port),
+        (PUBLISHER_A, MKTDATA_CHANNEL, port_of(PortRole::Mktdata))
+    );
+    // The runner's downgrade and not the rule set's own: the note names the
+    // hole in this object.
+    assert!(
+        row.detail.contains("overlaps 0:1-1 missing in this object"),
+        "{row:#?}"
+    );
+}
+
+#[cfg(feature = "conformance")]
+#[test]
+fn a_channel_violation_over_a_channel_with_our_own_hole_is_unverifiable() {
+    // A channel-grain rule cites no one path's range, so any hole on any path
+    // of the channel is enough: the state it judged may be missing exactly
+    // what that hole took.
+    let rows = findings(&common::starved(
+        &malformed_snapshot(),
+        BEFORE_THE_VIOLATION,
+    ));
+    assert!(violations(&rows).is_empty(), "{rows:#?}");
+    let row = row_for(&rows, "MBP.SNAP.GROUP_STRUCTURE");
+    assert_eq!(row.verdict, FindingVerdict::Unverifiable, "{row:#?}");
+    assert_eq!(row.source_addr, Ipv4Addr::UNSPECIFIED);
+    assert!(
+        row.detail.contains(&format!(
+            "the path from {PUBLISHER_A} has 0:1-1 missing in this object"
+        )),
+        "{row:#?}"
     );
 }

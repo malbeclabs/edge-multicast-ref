@@ -38,6 +38,7 @@ use dz_recorder_archive::rotate::{ArchiveWriter, ArchiveWriterConfig};
 use dz_recorder_archive::writer::{CaptureDropScope, LinkHeaders, RoleJoin};
 use dz_recorder_archive::Compression;
 use dz_recorder_core::{ChannelInstance, CompletedSegment, RecorderIdentity, RecvTsKind, Sink};
+use dz_recorder_replay::synthetic::StarvationWindow;
 use dz_recorder_replay::{ArchiveSource, OwnedDatagram, Termination};
 use tempfile::TempDir;
 
@@ -297,6 +298,33 @@ fn read_manifest(completed: &Path) -> SegmentManifest {
         .expect("every object lands with a manifest beside it");
     let json = std::fs::read_to_string(entry.path()).expect("the manifest is readable");
     serde_json::from_str(&json).unwrap_or_else(|e| panic!("the manifest deserialises: {e}: {json}"))
+}
+
+/// The same stream as recorded through a starvation window.
+///
+/// What [`SyntheticPublisher`](dz_recorder_replay::synthetic::SyntheticPublisher)
+/// does to its own stream, applied to one the real encoder wrote: the
+/// datagrams in the window never reach the archive, and the next one that does
+/// carries their count in its `drop_delta`. So the hole is the recorder's own,
+/// and admitted.
+pub fn starved(sent: &[OwnedDatagram], window: StarvationWindow) -> Vec<OwnedDatagram> {
+    let skipped = window.first..window.first + window.count;
+    assert!(
+        skipped.end < sent.len(),
+        "a window with nothing after it has nothing to carry its count"
+    );
+    let mut out = Vec::with_capacity(sent.len() - window.count);
+    let mut pending = 0u32;
+    for (i, dg) in sent.iter().enumerate() {
+        if skipped.contains(&i) {
+            pending += 1;
+            continue;
+        }
+        let mut dg = dg.clone();
+        dg.drop_delta += std::mem::take(&mut pending);
+        out.push(dg);
+    }
+    out
 }
 
 /// The receive side: what a capture would have said about each datagram's
