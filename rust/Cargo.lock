@@ -562,6 +562,7 @@ dependencies = [
  "dz-recorder-core",
  "dz-recorder-events",
  "dz-recorder-inline",
+ "dz-recorder-load",
  "dz-recorder-replay",
  "dz-recorder-rows",
  "serde_json",

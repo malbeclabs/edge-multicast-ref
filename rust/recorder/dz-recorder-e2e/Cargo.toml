@@ -41,6 +41,9 @@ dz-recorder-inline = { path = "../dz-recorder-inline" }
 # gates the module that uses it rather than the crate itself: a second copy of
 # the replay-to-pcap conversion here is exactly what promoting it removed.
 dz-recorder-conformance = { path = "../dz-recorder-conformance" }
+# The runner that turns the rule set's report into `conformance_finding` rows,
+# for the suite that asserts the rows rather than the tool's exit code.
+dz-recorder-load = { path = "../dz-recorder-load" }
 # The publisher as a venue links it, for the one suite whose feed no fixture
 # here can state: a strike is published by the reference-data registry behind
 # the runtime's own send path, so `strike_conformance.rs` composes that runtime
@@ -71,7 +74,7 @@ serde_json = { workspace = true }
 socket-e2e = []
 # Validation against edge-feed-spec's own `dz-conformance`, which lives in that
 # repository and is not vendored here. Off by default because the tool has to be
-# built and pointed at through DZ_CONFORMANCE_BIN; on, the tests fail rather
+# downloaded and pointed at through DZ_CONFORMANCE_BIN; on, the tests fail rather
 # than skip when it is absent, because a conformance gate that passes when it
 # could not run reports a clean feed for a stream nobody validated.
 conformance = []

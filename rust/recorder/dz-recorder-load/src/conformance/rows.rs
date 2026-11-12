@@ -14,7 +14,7 @@ use dz_recorder_archive::SegmentManifest;
 use dz_recorder_core::ChannelInstance;
 use dz_recorder_rows::{ConformanceFinding, Derivation, FindingVerdict, Nanos, PortRoleLabel};
 
-use super::findings::{with_note, Placed, Subject};
+use super::findings::{stated, with_note, Placed, Subject};
 
 /// How bad a verdict is, for the reduction.
 ///
@@ -79,14 +79,27 @@ fn row(stamp: &RunStamp<'_>, group: &[&Placed<'_>]) -> ConformanceFinding {
         .copied()
         .filter(|p| severity(p.verdict) == worst)
         .collect();
-    let first = winners[0];
-
-    // The span of the winning verdict's evidence, in the era of the first
-    // range that cites one — its reset count, and its era ordinal where the
-    // report states one. A span across a reset would compare two rulers.
-    let era = winners
+    // The entry the row speaks for: among the winners, the one the rule set
+    // stated most severely. A pass and a violation a hole both downgraded tie
+    // as unverifiable, and the row's detail is then the violation's message
+    // with its note, not the pass's.
+    let first = winners
         .iter()
-        .find_map(|p| p.entry.evidence.map(|e| (e.reset_count, e.era_index)));
+        .copied()
+        .rev()
+        .max_by_key(|p| severity(stated(p.entry.outcome)))
+        .expect("a group is never empty");
+
+    // The span of the winning verdict's evidence, in the era of the entry the
+    // row speaks for (or, where it cites none, of the first winner that does) — its reset count, and its era ordinal where the
+    // report states one. A span across a reset would compare two rulers.
+    let era = first
+        .entry
+        .evidence
+        .into_iter()
+        .chain(winners.iter().filter_map(|p| p.entry.evidence))
+        .map(|e| (e.reset_count, e.era_index))
+        .next();
     let ranges: Vec<(u64, u64)> = winners
         .iter()
         .filter_map(|p| p.entry.evidence)
@@ -346,6 +359,117 @@ mod tests {
         );
         assert!(
             rows[0].detail.contains("pass stated over 2 entries"),
+            "{}",
+            rows[0].detail
+        );
+    }
+
+    /// A pass and a violation of one rule on one instance, both over a hole,
+    /// are both unverifiable. The row keeps the violation's message, so it
+    /// still says what the rule set saw, and the pass's message is not
+    /// mistaken for it.
+    #[test]
+    fn a_downgraded_violation_speaks_for_the_row_over_a_downgraded_pass() {
+        use crate::conformance::findings::tests::SOURCE_IP;
+        use dz_recorder_loss::SequenceRun;
+
+        let m = manifest(
+            vec![joined(PortRole::Mktdata, GROUP, MKTDATA)],
+            &[(MKTDATA, coverage(0, 99))],
+        );
+        let mut holes = Holes::default();
+        holes.missing(&SequenceRun {
+            instance: ChannelInstance::new(SOURCE_IP, 1, MKTDATA),
+            group: GROUP,
+            role: PortRole::Mktdata,
+            era_ordinal: 1,
+            reset_count: 0,
+            missing_from: 5,
+            missing_to: 5,
+            before_ts_ns: 0,
+            after_ts_ns: 0,
+        });
+        let mut pass = ranged("TEST.A", Outcome::Pass, MKTDATA, 4, 6);
+        pass.detail = "the pass".to_owned();
+        let mut violation = ranged("TEST.A", Outcome::Violation, MKTDATA, 5, 7);
+        violation.detail = "the violation".to_owned();
+        let r = report(vec![pass, violation]);
+        let (placed, _) = place(&m, GROUP, &r, &holes, &carried(&m));
+        let rows = finding_rows(
+            &RunStamp {
+                manifest: &m,
+                rule_set_version: "v1+abc",
+                run_ts: 42,
+            },
+            &placed,
+        );
+        assert_eq!(rows.len(), 1, "{rows:#?}");
+        assert_eq!(rows[0].verdict, FindingVerdict::Unverifiable);
+        assert!(
+            rows[0].detail.starts_with("the violation"),
+            "{}",
+            rows[0].detail
+        );
+        assert!(
+            rows[0]
+                .detail
+                .contains("unverifiable stated over 2 entries"),
+            "{}",
+            rows[0].detail
+        );
+    }
+
+    /// The span follows the entry the row speaks for. A downgraded pass in one
+    /// era and a downgraded violation in the next: the row's detail is the
+    /// violation's, so its sequence numbers are the violation's era too.
+    #[test]
+    fn the_span_is_in_the_era_of_the_entry_the_row_speaks_for() {
+        use crate::conformance::findings::tests::SOURCE_IP;
+        use dz_recorder_loss::SequenceRun;
+
+        let m = manifest(
+            vec![joined(PortRole::Mktdata, GROUP, MKTDATA)],
+            &[(MKTDATA, coverage(0, 99))],
+        );
+        let mut holes = Holes::default();
+        for (era_ordinal, reset_count) in [(1, 0), (2, 1)] {
+            holes.missing(&SequenceRun {
+                instance: ChannelInstance::new(SOURCE_IP, 1, MKTDATA),
+                group: GROUP,
+                role: PortRole::Mktdata,
+                era_ordinal,
+                reset_count,
+                missing_from: 5,
+                missing_to: 5,
+                before_ts_ns: 0,
+                after_ts_ns: 0,
+            });
+        }
+        let mut pass = ranged("TEST.A", Outcome::Pass, MKTDATA, 4, 6);
+        pass.detail = "the pass".to_owned();
+        let mut violation = ranged("TEST.A", Outcome::Violation, MKTDATA, 5, 9);
+        violation.detail = "the violation".to_owned();
+        violation.evidence.as_mut().expect("ranged").reset_count = 1;
+        let r = report(vec![pass, violation]);
+        let (placed, _) = place(&m, GROUP, &r, &holes, &carried(&m));
+        let rows = finding_rows(
+            &RunStamp {
+                manifest: &m,
+                rule_set_version: "v1+abc",
+                run_ts: 42,
+            },
+            &placed,
+        );
+        assert_eq!(rows.len(), 1, "{rows:#?}");
+        assert_eq!(rows[0].verdict, FindingVerdict::Unverifiable);
+        assert!(
+            rows[0].detail.starts_with("the violation"),
+            "{}",
+            rows[0].detail
+        );
+        assert_eq!((rows[0].first_seq, rows[0].last_seq), (5, 9));
+        assert!(
+            rows[0].detail.contains("the range at reset count 1"),
             "{}",
             rows[0].detail
         );
