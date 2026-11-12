@@ -13,6 +13,7 @@ impl AppMessage for EndOfSession {
     const TYPE_ID: u8 = TYPE_END_OF_SESSION;
     const SIZE: usize = SIZE_END_OF_SESSION;
     const PORT_ROLES: &'static [PortRole] = &[PortRole::Mktdata];
+    const FEED_LOCAL: Option<u16> = None;
 
     fn encode_into(&self, dst: &mut [u8]) {
         debug_assert_eq!(dst.len(), Self::SIZE);

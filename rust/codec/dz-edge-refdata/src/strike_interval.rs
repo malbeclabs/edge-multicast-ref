@@ -160,6 +160,7 @@ impl AppMessage for StrikeInterval {
     const TYPE_ID: u8 = 0x09;
     const SIZE: usize = 40;
     const PORT_ROLES: &'static [PortRole] = &[PortRole::Refdata];
+    const FEED_LOCAL: Option<u16> = None;
 
     /// Refuses what [`StrikeInterval::defect`] names, where it is written. A
     /// subscriber could still read most of it, by the one rule it applies to
