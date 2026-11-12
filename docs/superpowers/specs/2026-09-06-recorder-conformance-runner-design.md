@@ -295,6 +295,23 @@ below the base rows, which is the band the retention split was drawn around. The
 cost that is *not* negligible is stated under **Cost** below, and it is not the
 row count.
 
+**Amended 2026-11-11: by default only violations are written.** The runner
+still decides every verdict as above, and a `[[conformance]]` entry with
+`verdicts = "all"` writes them all. Without it, a feed writes only `violation`
+rows. The table has no TTL, and passes for every rule on every instance of every
+object are most of its volume. The cost is the one stated above, and it is
+accepted for those feeds:
+
+- An object with no row was either not judged, or judged with no verdict left
+  a violation. That is not a clean result: an unverifiable or `na` verdict,
+  including a violation a hole downgraded, writes no row either. The judge ledger tells the two apart, and it is a file on the loader's
+  host, not a table. A reader of `conformance_finding` alone cannot.
+- The *`unverifiable` share* panel has no denominator, and no unverifiable row
+  either, on a feed that writes only violations.
+- The reduction to one row per rule and instance runs before the filter. A
+  violation still wins over a pass of the same rule and instance, and a
+  violation a hole downgraded is an unverifiable verdict, so it writes no row.
+
 ### `na`, and the vacuity a clean exit can hide
 
 A port role nobody joined produces no data, and no data looks exactly like a

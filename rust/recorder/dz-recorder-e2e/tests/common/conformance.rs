@@ -48,6 +48,7 @@ use dz_recorder_conformance::tool::{
     ConformanceTool, Invocation, PinnedRuleSet, PortRoles, RuleSet,
 };
 use dz_recorder_load::conformance::judge::{judge_object, JudgeInput};
+use dz_recorder_load::conformance::KeptVerdicts;
 use dz_recorder_replay::{ArchiveSource, OwnedDatagram, Termination};
 use dz_recorder_rows::{ConformanceFinding, FileSink, Grain, RowSink};
 
@@ -235,6 +236,9 @@ pub fn findings_of(archive: &Recorded, feed: &str) -> Findings {
         rule_set_feed: feed,
         scratch: scratch.path(),
         run_ts: 1,
+        // Every verdict, not the loader's default of violations only: the
+        // starvation tests assert the unverifiable rows a hole leaves.
+        verdicts: KeptVerdicts::All,
     })
     .unwrap_or_else(|e| panic!("the runner judged nothing: {e}"));
 
