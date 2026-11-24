@@ -22,7 +22,7 @@ use dz_recorder_rows::{ObjectId, RowSink};
 use super::findings::Refused;
 use super::judge::{judge_object, JudgeInput};
 use super::ledger::{JudgeEntry, JudgeLedger};
-use super::ConformanceRefusal;
+use super::{ConformanceRefusal, KeptVerdicts};
 use crate::loader::{
     now_unix_nanos, now_unix_seconds, oldest_age, read_manifest_if_present, take_turns,
 };
@@ -40,6 +40,8 @@ pub struct JudgedFeed<R> {
     /// What the rule set must answer with.
     pub rule_set_version: String,
     pub rule_set: R,
+    /// Which verdicts become rows.
+    pub verdicts: KeptVerdicts,
 }
 
 /// An object whose findings the sink holds, not yet in the ledger.
@@ -227,6 +229,7 @@ impl<S: RowSink, R: RuleSet + Clone> Judge<'_, S, R> {
                 manifest: &w.manifest,
                 rule_set: pinned,
                 rule_set_feed: &judged_feed.rule_set_feed,
+                verdicts: judged_feed.verdicts,
                 scratch: self.scratch,
                 run_ts: now_unix_nanos(),
             }) {
@@ -540,6 +543,7 @@ mod tests {
             rule_set_feed: "tob".to_owned(),
             rule_set_version: VERSION.to_owned(),
             rule_set,
+            verdicts: KeptVerdicts::All,
         }]
     }
 
@@ -695,6 +699,41 @@ mod tests {
         let (pass, _) = judge_pass(&host, &rows, &feeds, &mut ledger, &metrics, 0);
         assert_eq!(pass.judged, 0, "a new pin judges new objects only");
         assert_eq!(findings(&rows), 2);
+    }
+
+    /// Under the default, a clean object writes no row and is still judged:
+    /// its empty batch lands, the ledger records it, and the next pass does
+    /// not judge it again. A violation beside it is the only row written.
+    #[test]
+    fn by_default_a_clean_object_writes_no_row_and_is_still_judged_once() {
+        let clean_host = host(2);
+        let metrics = LoaderMetrics::new(SITE, RECORDER);
+        let rows = clean_host.dir.path().join("rows");
+        let mut ledger =
+            JudgeLedger::open(clean_host.dir.path().join("judged.jsonl")).expect("ledger");
+        let mut feeds = feed(clean());
+        feeds[0].verdicts = KeptVerdicts::default();
+
+        let (pass, errors) = judge_pass(&clean_host, &rows, &feeds, &mut ledger, &metrics, 0);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!((pass.judged, pass.recorded, pass.unjudged), (2, 2, 0));
+        assert_eq!(ledger.entries(), 2, "a clean object is ledgered");
+        assert_eq!(findings(&rows), 0, "a pass writes no row");
+
+        let (pass, _) = judge_pass(&clean_host, &rows, &feeds, &mut ledger, &metrics, 0);
+        assert_eq!(pass.judged, 0, "and is not judged again");
+
+        let violating = host(1);
+        let rows = violating.dir.path().join("rows");
+        let mut ledger = JudgeLedger::in_memory();
+        let mut feeds = feed(StubRuleSet::stating(vec![
+            on_mktdata("TEST.ONE", Outcome::Pass, 0, 99),
+            on_mktdata("TEST.TWO", Outcome::Violation, 0, 99),
+        ]));
+        feeds[0].verdicts = KeptVerdicts::default();
+        let (pass, _) = judge_pass(&violating, &rows, &feeds, &mut ledger, &metrics, 0);
+        assert_eq!(pass.recorded, 1);
+        assert_eq!(findings(&rows), 1, "only the violation");
     }
 
     /// A tool that answers with another version judges nothing, says so, and
@@ -936,6 +975,7 @@ mod tests {
             rule_set_feed: "tob".to_owned(),
             rule_set_version: VERSION.to_owned(),
             rule_set: clean(),
+            verdicts: KeptVerdicts::All,
         });
         let first_runs = std::rc::Rc::clone(&feeds[0].rule_set.runs);
         let second_runs = std::rc::Rc::clone(&feeds[1].rule_set.runs);

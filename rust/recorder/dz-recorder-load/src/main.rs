@@ -368,6 +368,7 @@ fn conformance_of<S>(
                 rule_set_feed: c.rule_set_feed.clone(),
                 rule_set_version: c.rule_set_version.clone(),
                 rule_set: ConformanceTool::new(tool, &scratch),
+                verdicts: c.verdicts,
             })
         })
         .collect::<Result<Vec<_>, Failure>>()?;

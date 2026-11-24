@@ -26,6 +26,7 @@ use thiserror::Error;
 
 use super::findings::{place, role_named, Carried, HoleFinder, Holes, Refused};
 use super::rows::{finding_rows, RunStamp};
+use super::KeptVerdicts;
 
 #[derive(Debug, Error)]
 pub enum JudgeError {
@@ -125,6 +126,8 @@ pub struct JudgeInput<'a, R> {
     /// The rule set's own name for the feed (its `-feed`), which is not the
     /// manifest's spec name.
     pub rule_set_feed: &'a str,
+    /// Which verdicts become rows.
+    pub verdicts: KeptVerdicts,
     /// The runner's own writable path. Never a directory the recorder's
     /// staging budget has to reach.
     pub scratch: &'a Path,
@@ -218,7 +221,13 @@ pub fn judge_object<R: RuleSet>(input: &JudgeInput<'_, R>) -> Result<Judged, Jud
         refused.add(&r);
         placed.extend(p);
     }
-    let rows = finding_rows(&stamp, &placed);
+    // The kept verdicts are chosen after the reduction, so a violation still wins
+    // over a pass of the same rule and instance, and a violation a hole
+    // downgraded to unverifiable is not kept as a violation.
+    let rows: Vec<_> = finding_rows(&stamp, &placed)
+        .into_iter()
+        .filter(|row| input.verdicts.keeps(row.verdict))
+        .collect();
     Ok(Judged {
         batch: RowBatch {
             object_key: manifest.object_key.clone(),
@@ -429,15 +438,103 @@ pub(crate) mod tests {
         rule_set: StubRuleSet,
         scratch: &Path,
     ) -> Result<Judged, JudgeError> {
+        judge_keeping(recorded, rule_set, scratch, KeptVerdicts::All)
+    }
+
+    fn judge_keeping(
+        recorded: &crate::conformance::testing::Recorded,
+        rule_set: StubRuleSet,
+        scratch: &Path,
+        verdicts: KeptVerdicts,
+    ) -> Result<Judged, JudgeError> {
         let pinned = PinnedRuleSet::resolve(rule_set, VERSION).expect("the stub names itself");
         judge_object(&JudgeInput {
             object: &recorded.object,
             manifest: &recorded.manifest,
             rule_set: &pinned,
             rule_set_feed: "tob",
+            verdicts,
             scratch,
             run_ts: 77,
         })
+    }
+
+    /// By default only violations become rows. A pass, an unverifiable stretch
+    /// and an `na` write nothing, and a rule that both passed and violated on
+    /// one instance is still one violation row: the reduction runs first.
+    #[test]
+    fn by_default_only_violations_become_rows() {
+        let (_dir, recorded) = record(&SyntheticPublisher::clean(200));
+        let scratch = tempfile::tempdir().expect("scratch");
+        let stub = StubRuleSet::stating(vec![
+            on_mktdata("TEST.PASS", Outcome::Pass, 0, 199),
+            on_mktdata("TEST.UNVERIFIABLE", Outcome::Unverifiable, 0, 199),
+            on_mktdata("TEST.NA", Outcome::Na, 0, 199),
+            on_mktdata("TEST.BOTH", Outcome::Pass, 0, 199),
+            on_mktdata("TEST.BOTH", Outcome::Violation, 4, 5),
+            on_mktdata("TEST.VIOLATION", Outcome::Violation, 7, 7),
+        ]);
+        let rows = judge_keeping(&recorded, stub, scratch.path(), KeptVerdicts::default())
+            .expect("judged")
+            .batch
+            .conformance_finding;
+        let mut kept: Vec<(&str, FindingVerdict)> = rows
+            .iter()
+            .map(|r| (r.rule_id.as_str(), r.verdict))
+            .collect();
+        kept.sort_unstable();
+        assert_eq!(
+            kept,
+            vec![
+                ("TEST.BOTH", FindingVerdict::Violation),
+                ("TEST.VIOLATION", FindingVerdict::Violation),
+            ],
+            "{rows:#?}"
+        );
+    }
+
+    /// A violation whose evidence a hole of the object overlaps is downgraded
+    /// to unverifiable, and by default an unverifiable verdict writes no row:
+    /// the downgrade is not undone by the filter.
+    #[test]
+    fn a_violation_a_hole_downgraded_writes_no_row_by_default() {
+        use dz_recorder_archive::writer::RoleJoin;
+        use dz_recorder_replay::synthetic::GROUP;
+        let port = port_for(PortRole::Mktdata);
+        let datagrams: Vec<_> = SyntheticPublisher::clean(20)
+            .datagrams()
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| *i != 5)
+            .map(|(_, dg)| dg)
+            .collect();
+        let (_dir, recorded) = crate::conformance::testing::record_datagrams(
+            &datagrams,
+            vec![RoleJoin::on(PortRole::Mktdata, GROUP, port)],
+        );
+        let scratch = tempfile::tempdir().expect("scratch");
+        let stating =
+            || StubRuleSet::stating(vec![on_mktdata("TEST.ONE", Outcome::Violation, 5, 5)]);
+        let all = judge_keeping(&recorded, stating(), scratch.path(), KeptVerdicts::All)
+            .expect("judged")
+            .batch
+            .conformance_finding;
+        assert_eq!(all.len(), 1, "{all:#?}");
+        assert_eq!(
+            all[0].verdict,
+            FindingVerdict::Unverifiable,
+            "the hole downgrades it"
+        );
+        let kept = judge_keeping(
+            &recorded,
+            stating(),
+            scratch.path(),
+            KeptVerdicts::Violations,
+        )
+        .expect("judged")
+        .batch
+        .conformance_finding;
+        assert!(kept.is_empty(), "{kept:#?}");
     }
 
     /// A clean object: one row per rule per instance, all `pass`, through the
@@ -599,6 +696,7 @@ pub(crate) mod tests {
             manifest: &recorded.manifest,
             rule_set: &pinned,
             rule_set_feed: "tob",
+            verdicts: KeptVerdicts::All,
             scratch: scratch.path(),
             run_ts,
         })

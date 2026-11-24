@@ -312,6 +312,11 @@ alone would make a *re-derived* object look loaded when its rows are not there.
 The tables are `ReplacingMergeTree` on the same pair, so a re-run after an
 analyser fix is a replace rather than a duplication.
 
+One exception: a `[[conformance]]` feed with the default `verdicts =
+"violations"`. A re-judge there can add a violation row but never remove one. A
+violation the re-judge no longer finds writes nothing to replace it, and the
+loader only inserts, so the old row stays until it is deleted by hand.
+
 Two consequences follow, and both look wrong until the above is in mind:
 
 - **The ledger entry is written after the rows are in.** An entry written first
@@ -402,12 +407,19 @@ A refused object is counted, named on stderr, and left unloaded. The pass carrie
 on: one damaged file must not stop an archive from being loaded, and the object
 it would stop at is the one closest to eviction.
 
-## Not here yet
+## Conformance
 
-The conformance runner over replay. `conformance_finding` is created as the
-table a runner fills, and this loader writes no row into it — an empty table is
-the honest statement that nothing judged the object, where a `pass` row would be
-a pass over a rule that never ran.
+A `[[conformance]]` entry runs the specification's rule set over every object
+of that feed and writes `conformance_finding` (see `loader.example.toml`). By
+default only `violation` rows are written; `verdicts = "all"` writes every
+verdict. Without passes, an object with no row was either not judged, or
+judged with no verdict left a violation, which is not proof that it is clean: an
+unverifiable or `na` verdict writes no row either. Only the conformance ledger
+on this host says which objects were judged. The
+design, and what writing only violations gives up, is in
+`docs/superpowers/specs/2026-09-06-recorder-conformance-runner-design.md`.
+
+## Not here yet
 
 The cross-site pass that turns `unverifiable` into `publisher`. This loader
 never writes `publisher`: it needs a datagram absent from *every* site with no
