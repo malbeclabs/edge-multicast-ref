@@ -257,19 +257,21 @@ jobs:
       # the placed per-rule report the runner reads and the reason
       # `depth_feed.rs` can assert rows rather than an exit code.
       #
-      # Pinned at conformance/v0.5.0, commit 546ed5c (upstream #121). The move
-      # from 57f2bd3 carries fifteen commits. Six change what the rule set
-      # judges or reports — #112 and #116 (the mbo book's id sets bounded),
-      # #113 (a snapshot group loss merged with the next one is unverifiable),
-      # #115 (any reset count change is a reset, per channel), #119 (refdata
-      # state keyed on the channel instance) and #121 (the rule report) — and
-      # the rest are specification text and CI.
-      SPEC_TAG: conformance/v0.5.0
-      SPEC_VERSION: v0.5.0+546ed5c2a7d3
-      SPEC_ASSET: dz-conformance_0.5.0_linux_amd64
+      # Pinned at conformance/v0.6.1, commit 2cc7b92 (upstream #138). The move
+      # from v0.5.0 (546ed5c) carries thirteen commits. Eleven change what the
+      # rule set judges or reports: the market-by-order book is keyed on the
+      # channel instance, seeded from a snapshot and audited past K (#122,
+      # #123, #124, #128, #132, #133, #138); refdata keeps the first group
+      # across the first freeze (#127); market-by-order findings and transport
+      # loss name the publisher (#125, #126); and a backward datagram a gap
+      # counted as lost is named reordered (#135). The other two are the
+      # source registry (#129) and CI (#134). The e2e suite passes unchanged.
+      SPEC_TAG: conformance/v0.6.1
+      SPEC_VERSION: v0.6.1+2cc7b92302c8
+      SPEC_ASSET: dz-conformance_0.6.1_linux_amd64
       # The archive's digest, pinned here: a release can be replaced under
       # its tag, and its own `.sha256` would be replaced with it.
-      SPEC_SHA256: 0c9881bceb74e17b6c16800cea9ab7326ffd0f376165ddde7f82f9fc69f9d28d
+      SPEC_SHA256: 6be1d4a021a95745384cb2cd74d0d4ee1b6fcbdb440cb4e84dd4c924a77f450e
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
