@@ -139,7 +139,6 @@ const RUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// `--version` answers with this crate's own version, which is the runtime's
 /// number and not the linking binary's. A venue whose deployment pins its own
 /// version passes it: see [`run_with_version`].
-#[must_use]
 pub fn run(registry: AdapterRegistry) -> ExitCode {
     run_with_version(RUNTIME_VERSION, registry)
 }
@@ -177,7 +176,6 @@ pub fn run(registry: AdapterRegistry) -> ExitCode {
 ///   number a scrape reports and the number the binary answers with cannot
 ///   disagree. The commit and the toolchain on that gauge stay compile-time
 ///   environment reads, which is where a build stamps them.
-#[must_use]
 pub fn run_with_version(version: &str, registry: AdapterRegistry) -> ExitCode {
     // Once, for both answers: what stdout says and what the gauge carries are
     // the same string, so it is read and trimmed once rather than twice.
