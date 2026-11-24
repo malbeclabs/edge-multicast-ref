@@ -103,6 +103,24 @@ impl JudgeError {
         matches!(self, Self::Tool { .. })
     }
 
+    /// Whether the object was gone when it came to be read: evicted under the
+    /// staging budget after the scan read its manifest. The object's, not the
+    /// rule set's, and not a failure: the load counts the same race as a
+    /// `vanished` skip, and a back-judge takes the oldest objects first, which
+    /// are the ones closest to eviction.
+    #[must_use]
+    pub fn is_vanished(&self) -> bool {
+        let not_found = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound;
+        match self {
+            Self::Digest(DeriveError::Io { source, .. }) => not_found(source),
+            Self::Open {
+                cause: SourceError::Io(source),
+                ..
+            } => not_found(source),
+            _ => false,
+        }
+    }
+
     /// Whether the binary could not be started at all — nothing about any
     /// object, and the same for every object of the feed.
     #[must_use]
@@ -614,6 +632,30 @@ pub(crate) mod tests {
         let err = judge(&recorded, stub, scratch.path()).expect_err("refused");
         assert!(matches!(err, JudgeError::Digest(_)), "{err}");
         assert!(runs.borrow().is_empty());
+    }
+
+    /// An object evicted after its manifest was read is vanished, not damaged.
+    #[test]
+    fn an_object_gone_before_it_is_read_is_vanished() {
+        let (_dir, recorded) = record(&SyntheticPublisher::clean(50));
+        std::fs::remove_file(&recorded.object).expect("evict");
+        let scratch = tempfile::tempdir().expect("scratch");
+        let stub = StubRuleSet::stating(vec![on_mktdata("TEST.ONE", Outcome::Pass, 0, 49)]);
+        let runs = std::rc::Rc::clone(&stub.runs);
+        let err = judge(&recorded, stub, scratch.path()).expect_err("gone");
+        assert!(err.is_vanished(), "{err}");
+        assert!(runs.borrow().is_empty());
+    }
+
+    /// A digest mismatch is damage, and never mistaken for an eviction.
+    #[test]
+    fn a_digest_mismatch_is_not_vanished() {
+        let (_dir, mut recorded) = record(&SyntheticPublisher::clean(50));
+        recorded.manifest.sha256 = "0".repeat(64);
+        let scratch = tempfile::tempdir().expect("scratch");
+        let stub = StubRuleSet::stating(vec![on_mktdata("TEST.ONE", Outcome::Pass, 0, 49)]);
+        let err = judge(&recorded, stub, scratch.path()).expect_err("refused");
+        assert!(!err.is_vanished(), "{err}");
     }
 
     /// A rule set that could not run is an error and never a verdict.

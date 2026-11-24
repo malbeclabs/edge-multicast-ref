@@ -59,6 +59,9 @@ pub struct JudgePass {
     /// Objects whose judgement is now in the ledger.
     pub recorded: u64,
     pub failed: u64,
+    /// Objects evicted between the scan and the read: not judged, not a
+    /// failure, and not charged. Gone from the next pass's scan.
+    pub vanished: u64,
     /// Objects of judged feeds no version has judged, held ones included.
     pub unjudged: u64,
     pub held: u64,
@@ -234,6 +237,13 @@ impl<S: RowSink, R: RuleSet + Clone> Judge<'_, S, R> {
                 run_ts: now_unix_nanos(),
             }) {
                 Ok(judged) => judged,
+                Err(e) if e.is_vanished() => {
+                    // Not the object's fault and not the tool's: the next
+                    // object of this feed is judged as if this one never was.
+                    pass.vanished += 1;
+                    self.failures.remove(&w.id);
+                    continue;
+                }
                 Err(e) => {
                     pass.failed += 1;
                     errors.push(format!("conformance {}: {e}", judged_feed.feed));
@@ -805,6 +815,63 @@ mod tests {
         first_fails.fail_runs.insert(0);
         let (pass, _) = judge_pass(&host, &rows, &feed(first_fails), &mut ledger, &metrics, 0);
         assert_eq!((pass.judged, pass.failed, pass.unjudged), (2, 1, 1));
+        assert_eq!(findings(&rows), 2);
+    }
+
+    /// An object evicted between the scan and the read is neither judged nor
+    /// failed, and never charged: the feed goes on to its next object.
+    #[test]
+    fn an_object_evicted_before_it_is_read_is_vanished_and_not_failed() {
+        let host = host(3);
+        let metrics = LoaderMetrics::new(SITE, RECORDER);
+        let rows = host.dir.path().join("rows");
+        let mut ledger = JudgeLedger::in_memory();
+        let dir = host.completed.join(FEED);
+        let mut objects: Vec<_> = std::fs::read_dir(&dir)
+            .expect("the feed directory")
+            .map(|e| e.expect("an entry").path())
+            .filter(|p| p.to_string_lossy().ends_with(".pcapng.zst"))
+            .collect();
+        objects.sort();
+        assert_eq!(objects.len(), 3, "{objects:?}");
+        // After the scan and before the read, as eviction does it: the pass
+        // asks `stop` before each object, so the first ask is the window. The
+        // object and not its manifest, so the read is what finds it gone.
+        let evicted = std::cell::Cell::new(false);
+        let stop = || {
+            if !evicted.replace(true) {
+                std::fs::remove_file(&objects[0]).expect("evict the oldest");
+            }
+            false
+        };
+        let scratch = host.dir.path().join("scratch");
+        std::fs::create_dir_all(&scratch).expect("scratch");
+        let mut sink = FileSink::create(&rows).expect("a sink");
+        let mut held = Vec::new();
+        let mut failures = std::collections::HashMap::new();
+        let feeds = feed(clean());
+        let (pass, errors) = Judge {
+            objects_dir: &host.completed,
+            site: SITE,
+            recorder: RECORDER,
+            max_objects: 0,
+            feeds: &feeds,
+            scratch: &scratch,
+            ledger: &mut ledger,
+            sink: &mut sink,
+            metrics: &metrics,
+            held: &mut held,
+            failures: &mut failures,
+        }
+        .run_once(&stop);
+        sink.flush(0).expect("flushed");
+        assert!(failures.is_empty(), "nothing is charged: {failures:?}");
+        assert_eq!(
+            (pass.judged, pass.failed, pass.vanished),
+            (2, 0, 1),
+            "{errors:?}"
+        );
+        assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(findings(&rows), 2);
     }
 

@@ -437,6 +437,16 @@ pub struct Loader {
     /// that coalesces: a pass may derive sixty objects and load none, and a
     /// bound on the loading would not have bounded that pass at all.
     pub max_objects_per_pass: usize,
+    /// Objects one pass will judge, when it is not `max_objects_per_pass`.
+    /// Zero is no bound; absent is `max_objects_per_pass`.
+    ///
+    /// Its own number because the load and the judging take turns in one
+    /// loop: every object judged delays the next load by the seconds the rule
+    /// set takes over it. A host whose load needs most of its bound to keep up
+    /// cannot also judge that many objects a pass, or the load falls behind
+    /// and does not recover.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conformance_max_objects_per_pass: Option<usize>,
     /// What the conformance runner has judged, keyed on the rule set version.
     /// A file of its own, never the load ledger.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -445,6 +455,15 @@ pub struct Loader {
     /// runner's own writable path, never inside `objects_dir`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conformance_scratch: Option<PathBuf>,
+}
+
+impl Loader {
+    /// The judging's bound: its own key, or the load's when it has none.
+    #[must_use]
+    pub fn conformance_max_objects(&self) -> usize {
+        self.conformance_max_objects_per_pass
+            .unwrap_or(self.max_objects_per_pass)
+    }
 }
 
 impl Default for Loader {
@@ -457,6 +476,7 @@ impl Default for Loader {
             ledger: PathBuf::new(),
             poll_interval: Duration::from_secs(30),
             max_objects_per_pass: 0,
+            conformance_max_objects_per_pass: None,
             conformance_ledger: None,
             conformance_scratch: None,
         }
@@ -786,9 +806,10 @@ impl LoaderConfig {
             };
             let _ = writeln!(
                 out,
-                "conformance_ledger={} conformance_scratch={}",
+                "conformance_ledger={} conformance_scratch={} conformance_max_objects_per_pass={}",
                 shown(&self.loader.conformance_ledger),
-                shown(&self.loader.conformance_scratch)
+                shown(&self.loader.conformance_scratch),
+                self.loader.conformance_max_objects()
             );
         }
         for derived in &self.market_data {
@@ -1285,6 +1306,44 @@ persist_snapshot_levels = true
         assert!(
             LoaderConfig::parse(&text).is_err(),
             "an unknown value is refused"
+        );
+    }
+
+    /// The judging takes the load's bound unless it states its own, and the
+    /// summary says which number it runs at.
+    #[test]
+    fn the_judging_bound_is_the_loads_unless_it_has_its_own() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let (_, text) = judging(dir.path(), "");
+        let text = text.replace(
+            "poll_interval = 30",
+            "poll_interval = 30\nmax_objects_per_pass = 60",
+        );
+        let config = LoaderConfig::parse(&text).expect("parses");
+        assert_eq!(config.loader.conformance_max_objects(), 60);
+        assert!(
+            config
+                .summary()
+                .contains("conformance_max_objects_per_pass=60"),
+            "{}",
+            config.summary()
+        );
+        let text = text.replace(
+            "max_objects_per_pass = 60",
+            "max_objects_per_pass = 60\nconformance_max_objects_per_pass = 10",
+        );
+        let config = LoaderConfig::parse(&text).expect("parses");
+        assert_eq!(
+            config.loader.max_objects_per_pass, 60,
+            "the load keeps its own"
+        );
+        assert_eq!(config.loader.conformance_max_objects(), 10);
+        assert!(
+            config
+                .summary()
+                .contains("conformance_max_objects_per_pass=10"),
+            "{}",
+            config.summary()
         );
     }
 
