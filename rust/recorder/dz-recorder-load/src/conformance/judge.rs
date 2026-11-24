@@ -112,11 +112,13 @@ impl JudgeError {
     pub fn is_vanished(&self) -> bool {
         let not_found = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound;
         match self {
-            Self::Digest(DeriveError::Io { source, .. }) => not_found(source),
+            Self::Digest(DeriveError::Io {
+                source: io_error, ..
+            }) => not_found(io_error),
             Self::Open {
-                cause: SourceError::Io(source),
+                cause: SourceError::Io(io_error),
                 ..
-            } => not_found(source),
+            } => not_found(io_error),
             _ => false,
         }
     }
