@@ -265,7 +265,7 @@ jobs:
       # across the first freeze (#127); market-by-order findings and transport
       # loss name the publisher (#125, #126); and a backward datagram a gap
       # counted as lost is named reordered (#135). The other two are the
-      # source registry (#129) and CI (#134). The e2e suite passes unchanged.
+      # Source ID Registry (#129) and CI (#134). The e2e suite passes unchanged.
       SPEC_TAG: conformance/v0.6.1
       SPEC_VERSION: v0.6.1+2cc7b92302c8
       SPEC_ASSET: dz-conformance_0.6.1_linux_amd64
