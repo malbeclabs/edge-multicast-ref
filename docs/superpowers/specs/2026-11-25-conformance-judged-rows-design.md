@@ -75,7 +75,7 @@ CREATE TABLE IF NOT EXISTS recorder.conformance_judged (
 )
 ENGINE = ReplacingMergeTree(run_ts)
 PARTITION BY toYYYYMMDD(window_start)
-ORDER BY (feed, group_addr, source_addr, channel_id, dst_port, window_start, site, recorder, rule_set_version);
+ORDER BY (feed, group_addr, source_addr, channel_id, dst_port, window_start, object_key, site, recorder, rule_set_version);
 ```
 
 - **Grain.** One row per `(object, channel instance)` that the finding rows
@@ -100,6 +100,10 @@ ORDER BY (feed, group_addr, source_addr, channel_id, dst_port, window_start, sit
 - **No TTL**, as for `conformance_finding`, and for the same reason. The rows
   are a few per object, not one per rule.
 - **Identity and window are the manifest's**, as in `finding_rows`.
+- **`object_key` is in the sort key.** Two objects can open at the same
+  instant: a rotation with a fixed clock does it, and so does a recorder
+  restarted inside one tick. Without the key, `ReplacingMergeTree` would keep
+  one object's coverage and drop the other's counts.
 - **`derivation`** is always `archive`, and in no sort key, because every grain
   carries its provenance (`provenance_is_on_every_grain_and_in_no_sort_key`).
 

@@ -195,7 +195,7 @@ fn row(stamp: &RunStamp<'_>, group: &[&Placed<'_>]) -> ConformanceFinding {
 /// instance, and spread over several rows a sum would count them once per row.
 ///
 /// Keyed on the group and the instance, which with the run's identity and the
-/// object's window is the table's whole sort key, so no two rows of one run
+/// object and its window is the table's whole sort key, so no two rows of one run
 /// collapse into one another under `ReplacingMergeTree`.
 #[must_use]
 pub fn judged_rows(

@@ -38,7 +38,9 @@
 -- IN. The row is about an instance and not a rule, and a dashboard keys a feed
 -- on its group, so `feed` and `group_addr` lead. `site` and `recorder` are in it
 -- for the reason `001` gives for the finding table: two vantages of one
--- instance are two observations. `rule_set_version` is in it so that a re-judge
+-- instance are two observations. `object_key` is in it because two objects can
+-- open at the same instant (a rotation on a fixed clock does it), and without it
+-- one object's counts would replace the other's. `rule_set_version` is in it so that a re-judge
 -- under a new version stands beside the old one, and `ReplacingMergeTree(run_ts)`
 -- so that a re-run of one version replaces only its own row. The runner writes
 -- one row per distinct key in a run, so no two rows of one run collapse.
@@ -100,4 +102,4 @@ CREATE TABLE IF NOT EXISTS recorder.conformance_judged (
 )
 ENGINE = ReplacingMergeTree(run_ts)
 PARTITION BY toYYYYMMDD(window_start)
-ORDER BY (feed, group_addr, source_addr, channel_id, dst_port, window_start, site, recorder, rule_set_version);
+ORDER BY (feed, group_addr, source_addr, channel_id, dst_port, window_start, object_key, site, recorder, rule_set_version);

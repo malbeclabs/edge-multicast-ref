@@ -29,7 +29,7 @@ use common::{
 use dz_edge_core::PortRole;
 use dz_recorder_clickhouse::{migrations, schema, ClickHouseConfig, ClickHouseSink};
 use dz_recorder_replay::Fault;
-use dz_recorder_rows::{Grain, Nanos, RowSink, RowSinkError};
+use dz_recorder_rows::{Grain, Nanos, RowBatch, RowSink, RowSinkError};
 use dz_recorder_venue::{RefusalCount, VenueBookTop, VenueObjectRow};
 
 /// One instant for every sink call in this file.
@@ -237,6 +237,35 @@ fn the_checked_in_ddl_accepts_what_the_loader_sends() {
         assert_eq!(written.accepted.rows(grain), count as u64, "{grain}");
         assert_eq!(scratch.count(grain.table()), count as u64, "{grain}");
     }
+}
+
+/// Two objects that open at the same instant keep their own coverage.
+///
+/// A rotation on a fixed clock opens two objects with one `window_start`, and so
+/// does a recorder restarted inside one tick. Their `conformance_judged` rows
+/// agree on everything but the object, so only `object_key` in the sort key
+/// keeps a merge from replacing one object's counts with the other's.
+#[test]
+fn two_objects_opening_at_one_instant_keep_their_own_coverage() {
+    let mut scratch = Scratch::open("judged_same_start");
+    let first = common::conformance_judged();
+    let mut second = first.clone();
+    second.object_key = format!("{}.second", first.object_key);
+    second.pass = first.pass + 7;
+    for (i, row) in [first, second].into_iter().enumerate() {
+        let rows = RowBatch {
+            object_key: row.object_key.clone(),
+            object_sha256: format!("{i:064}"),
+            conformance_judged: vec![row],
+            ..RowBatch::default()
+        };
+        scratch
+            .sink
+            .write_batch(rows, NOW)
+            .expect("the object lands");
+    }
+    scratch.merge("conformance_judged");
+    assert_eq!(scratch.count("conformance_judged"), 2);
 }
 
 /// A re-run after an analyser fix is a replace and not a duplication.

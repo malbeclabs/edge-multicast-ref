@@ -1416,15 +1416,16 @@ fn the_judged_file_tells_an_operator_to_re_apply_the_account_file() {
 /// One row per instance per run is what the runner writes, so the key has to
 /// hold everything that tells two of a run's rows apart and nothing that a
 /// re-run would change: the group leads beside the feed because that is what a
-/// reader keys a feed on, and the site, the recorder and the rule set version
-/// are in it for the reasons `001` gives for the finding table.
+/// reader keys a feed on, the object because two objects can open at the same
+/// instant and each keeps its own counts, and the site, the recorder and the
+/// rule set version are in it for the reasons `001` gives for the finding table.
 #[test]
 fn the_judged_sort_key_is_the_one_its_rows_were_shaped_for() {
     let sql = conformance_judged_sql();
     assert_eq!(
         sort_key(sql, "conformance_judged"),
-        "feed, group_addr, source_addr, channel_id, dst_port, window_start, site, recorder, \
-         rule_set_version"
+        "feed, group_addr, source_addr, channel_id, dst_port, window_start, object_key, site, \
+         recorder, rule_set_version"
     );
     assert!(sql.contains("ENGINE = ReplacingMergeTree(run_ts)"));
 }
