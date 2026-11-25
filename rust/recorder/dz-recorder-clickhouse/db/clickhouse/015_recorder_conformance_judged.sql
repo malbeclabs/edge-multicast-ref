@@ -52,6 +52,15 @@
 -- NO TTL, as for `conformance_finding` and for the same reason, which `002`
 -- states. The rows are a few per object, not one per rule.
 --
+-- PARTITIONED BY DAY, AS EVERY TABLE IS, AND NOT BY MONTH. At this volume a
+-- day is a small partition: one a day, harmless for years. A month would suit
+-- the volume, but the rule (`every_table_is_partitioned_by_a_day`) is what lets
+-- a TTL, if one is ever wanted, drop whole days instead of rewriting parts.
+--
+-- A READER THAT SCANS EVERY GROUP FOR A RECENT WINDOW is pruned by the
+-- partition, not by the key: `window_start` is sixth in it, because the key
+-- serves a lookup of one feed by its group. At this volume that is enough.
+--
 -- RE-APPLY `004` AFTER THIS FILE, OR THE TABLE BELOW IS UNWRITABLE
 --
 -- `004_recorder_loader_user.sql` is where the grant for this table lives,
