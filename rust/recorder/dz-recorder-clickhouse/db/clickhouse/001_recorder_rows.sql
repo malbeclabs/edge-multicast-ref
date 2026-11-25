@@ -394,9 +394,12 @@ CREATE TABLE IF NOT EXISTS recorder.conformance_finding (
     env              LowCardinality(String),
     feed             LowCardinality(String),
     -- The group the manifest joined for the row's port role and destination
-    -- port, and 0.0.0.0 where it names no one group for that pair. In no sort
-    -- key.
-    group_addr       IPv4 DEFAULT toIPv4('0.0.0.0'),
+    -- port, and 0.0.0.0 where it names no one group for that pair. Last in the
+    -- sort key, so two feeds whose findings agree on every other column of it
+    -- (a channel-grain row on one port at one instant) stay two rows. No stated
+    -- DEFAULT: the type's own is 0.0.0.0, and ClickHouse refuses to append a
+    -- column with a default expression to a key, which is what 014 does.
+    group_addr       IPv4,
     port_role        LowCardinality(String),
     source_addr      IPv4,
     channel_id       UInt8,
@@ -417,4 +420,4 @@ CREATE TABLE IF NOT EXISTS recorder.conformance_finding (
 )
 ENGINE = ReplacingMergeTree(run_ts)
 PARTITION BY toYYYYMMDD(window_start)
-ORDER BY (rule_id, source_addr, channel_id, dst_port, window_start, site, recorder, rule_set_version);
+ORDER BY (rule_id, source_addr, channel_id, dst_port, window_start, site, recorder, rule_set_version, group_addr);

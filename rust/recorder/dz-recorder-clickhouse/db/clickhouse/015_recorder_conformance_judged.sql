@@ -34,9 +34,11 @@
 -- the object's, so judging lags capture, and a reader asking about the last few
 -- minutes of wall-clock time finds nothing and must not read that as a gap.
 --
--- THE KEY IS `conformance_finding`'s WITH THE RULE TAKEN OUT AND THE GROUP PUT
--- IN. The row is about an instance and not a rule, and a dashboard keys a feed
--- on its group, so `feed` and `group_addr` lead. `site` and `recorder` are in it
+-- THE KEY IS `conformance_finding`'s WITH THE RULE TAKEN OUT, AND THE FEED, THE
+-- GROUP AND THE OBJECT IN IT FROM THE START. The row is about an instance and
+-- not a rule, and a dashboard keys a feed on its group, so `feed` and
+-- `group_addr` lead. A new table can have the key the finding table could only
+-- partly be given (`014` says why), so this one is what a reader counts from. `site` and `recorder` are in it
 -- for the reason `001` gives for the finding table: two vantages of one
 -- instance are two observations. `object_key` is in it because two objects can
 -- open at the same instant (a rotation on a fixed clock does it), and without it

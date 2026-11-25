@@ -111,8 +111,10 @@ ORDER BY (feed, group_addr, source_addr, channel_id, dst_port, window_start, obj
 
 ```sql
 ALTER TABLE recorder.conformance_finding
-    ADD COLUMN IF NOT EXISTS severity   LowCardinality(String) DEFAULT '' AFTER rule_id,
-    ADD COLUMN IF NOT EXISTS group_addr IPv4 DEFAULT toIPv4('0.0.0.0') AFTER feed;
+    ADD COLUMN IF NOT EXISTS severity LowCardinality(String) DEFAULT '' AFTER rule_id;
+ALTER TABLE recorder.conformance_finding
+    ADD COLUMN IF NOT EXISTS group_addr IPv4 AFTER feed,
+    MODIFY ORDER BY (rule_id, source_addr, channel_id, dst_port, window_start, site, recorder, rule_set_version, group_addr);
 ```
 
 - `severity` is the stated severity of the entry the row speaks for (`first`
@@ -124,8 +126,18 @@ ALTER TABLE recorder.conformance_finding
   destination port, the same lookup `segment_coverage.roles_joined` records.
   It is `0.0.0.0` where the manifest names no group for that pair, which a
   reader must not resolve by guessing. A port joined in more than one group
-  for the same role is `0.0.0.0` too, for the same reason. It is in no sort
-  key.
+  for the same role is `0.0.0.0` too, for the same reason.
+- **`group_addr` goes last in the finding table's sort key.** The key `001`
+  gave it names no feed and no group, so two feeds' channel-grain findings
+  (source `0.0.0.0`) for one rule, on one port and `Channel ID`, opening at one
+  instant, were one row to the replacing merge, and `FINAL` dropped one feed's
+  violation. `MODIFY ORDER BY` appends only a column the same `ALTER` adds, so
+  the group can go in and `feed` and `object_key`, which exist already, cannot.
+  ClickHouse also refuses to append a column with a default expression, so the
+  column has the type's own default, which is the same `0.0.0.0`. What still
+  folds is two objects of one feed opening at one instant. So a reader counts
+  violations from `conformance_judged`, whose key has the object, and reads
+  this table for the rules behind the counts.
 
 `RuleOutcome` gains `severity: Option<String>`, with `#[serde(default)]`. A
 report that does not state it parses as before and writes `''`.

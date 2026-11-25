@@ -1352,7 +1352,7 @@ fn the_severity_file_adds_the_columns_001_declares() {
         let declared = declared.trim_end_matches(',');
         assert!(
             sql.contains(&format!(
-                "ADD COLUMN IF NOT EXISTS {column} {declared}\n    AFTER {after};"
+                "ADD COLUMN IF NOT EXISTS {column} {declared}\n    AFTER {after}"
             )),
             "`014` does not add `{column} {declared}` after `{after}` as `001` \
              declares it"
@@ -1364,13 +1364,27 @@ fn the_severity_file_adds_the_columns_001_declares() {
         "the order a deploy has to take is not stated where an operator applies \
          the file"
     );
-    // Neither column is in the finding table's key: a rule's severity is the
-    // rule set version's, and the group is the manifest's, so a row re-written
-    // with either moved must replace the old one rather than stand beside it.
+    // The severity is in no key: it is the rule set version's, so a row
+    // re-written with it changed must replace the old one, not stand beside it.
+    //
+    // The group is last in it, in `001` and in `014` alike, so two feeds'
+    // channel-grain findings on one port at one instant stay two rows, and an
+    // upgraded table and a fresh one collapse the same rows.
     let key = sort_key(rows_sql(), "conformance_finding");
-    for column in ["severity", "group_addr"] {
-        assert!(!key.contains(column), "{column} reached the key: {key}");
-    }
+    assert!(!key.contains("severity"), "severity reached the key: {key}");
+    let expected = "rule_id, source_addr, channel_id, dst_port, window_start, site, recorder, \
+                    rule_set_version, group_addr";
+    assert_eq!(key, expected);
+    assert!(
+        sql.contains(&format!("MODIFY ORDER BY ({expected});")),
+        "`014` does not append the group to the key `001` declares"
+    );
+    // ClickHouse refuses to append a column with a default expression to a
+    // key, so the column relies on the type's own default, 0.0.0.0.
+    assert_eq!(
+        column_type(rows_sql(), "conformance_finding", "group_addr").trim_end_matches(','),
+        "IPv4"
+    );
 }
 
 /// **`015` tells an operator to re-apply `004`, and quotes the grant `004`

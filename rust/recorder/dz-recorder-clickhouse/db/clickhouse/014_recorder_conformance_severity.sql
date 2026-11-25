@@ -19,17 +19,41 @@
 -- port but not the group, so the reader rebuilt a mapping the manifest already
 -- holds. The runner now writes the group the manifest joined for the row's port
 -- role and destination port, the pair `segment_coverage.roles_joined` records.
--- In no sort key.
+--
+-- `group_addr` GOES LAST IN THE SORT KEY, AND THE KEY KEEPS NO FEED. The key
+-- `001` gave the table names no feed and no group, so two feeds' findings that
+-- agree on the rule, the source, the channel, the port, the window start, the
+-- vantage and the version were one row to the replacing merge, and `FINAL`
+-- kept one feed's violation and dropped the other's. Channel grain makes that
+-- ordinary rather than rare: every such row has source 0.0.0.0, and feeds that
+-- rotate on one clock open their windows at one instant. `MODIFY ORDER BY`
+-- appends only a column the same `ALTER` adds, so `group_addr` can go in and
+-- `feed` and `object_key`, which `001` already has, cannot. The group tells two
+-- feeds apart, because a subscriber joins a feed by it. What stays one row is
+-- two objects of one feed opening at one instant, which a recorder restarted
+-- inside one tick does: the counts a reader shows come from
+-- `conformance_judged`, whose key has the object, and this table is the detail
+-- behind them.
+--
+-- THE COLUMN HAS NO STATED DEFAULT. ClickHouse refuses to append a column with
+-- a default expression to a key (`Code: 36`). The type's own default is
+-- 0.0.0.0, which is the value a stated one would give.
+--
+-- Appending a column the same statement adds leaves every existing part in
+-- key order, because the column is one value in all of them, so nothing is
+-- rewritten. The primary index stays the old key, which is a prefix of the
+-- new one. On a fresh deployment, and on a second apply, the column already
+-- exists and the key already ends in it, so the statement is a no-op.
 --
 -- WHAT A ROW WRITTEN BEFORE THIS FILE READS AS. `severity` reads as '', which a
 -- reader takes as unknown and never as `info`: an old violation of a `must`
 -- rule is not a minor one. `group_addr` reads as `0.0.0.0`, which is also what
 -- the runner writes where the manifest names no one group for the pair, and a
--- reader must not resolve it by guessing from the feed's name. Both defaults
--- are stated rather than left to the type, so they are the documented meaning
--- of an absent value and not an accident of it.
+-- reader must not resolve it by guessing from the feed's name. `severity`'s
+-- default is stated, and `group_addr`'s is the type's for the reason above;
+-- both are the documented meaning of an absent value and not an accident of it.
 --
--- Adding a column with a DEFAULT to a MergeTree is a metadata change: existing
+-- Adding a column to a MergeTree is a metadata change: existing
 -- parts are not rewritten, and a read of one materialises the default. No TTL
 -- change (the table has none, and `002` says why), no grant change (`004`
 -- grants at table level), and no view re-stated, because no star view reads
@@ -47,5 +71,6 @@ ALTER TABLE recorder.conformance_finding
     AFTER rule_id;
 
 ALTER TABLE recorder.conformance_finding
-    ADD COLUMN IF NOT EXISTS group_addr IPv4 DEFAULT toIPv4('0.0.0.0')
-    AFTER feed;
+    ADD COLUMN IF NOT EXISTS group_addr IPv4
+    AFTER feed,
+    MODIFY ORDER BY (rule_id, source_addr, channel_id, dst_port, window_start, site, recorder, rule_set_version, group_addr);
