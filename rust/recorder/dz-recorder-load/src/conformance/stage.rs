@@ -208,6 +208,7 @@ impl<S: RowSink, R: RuleSet + Clone> Judge<'_, S, R> {
         let mut tool_failed = vec![false; self.feeds.len()];
         let mut last_failed_on_object = vec![false; self.feeds.len()];
         let mut attempted = 0usize;
+        let mut vanished = std::collections::HashSet::new();
         for index in order {
             if stop() {
                 break;
@@ -240,8 +241,12 @@ impl<S: RowSink, R: RuleSet + Clone> Judge<'_, S, R> {
                 Err(e) if e.is_vanished() => {
                     // Not the object's fault and not the tool's: the next
                     // object of this feed is judged as if this one never was.
+                    // Nor any work, so it takes no slot of the pass's bound,
+                    // and it is not waiting any more, so it is not unjudged.
+                    attempted -= 1;
                     pass.vanished += 1;
                     self.failures.remove(&w.id);
+                    vanished.insert(w.id.clone());
                     continue;
                 }
                 Err(e) => {
@@ -325,6 +330,7 @@ impl<S: RowSink, R: RuleSet + Clone> Judge<'_, S, R> {
         pass.held = self.held.len() as u64;
         let still: Vec<u64> = unjudged
             .iter()
+            .filter(|(id, _)| !vanished.contains(id))
             .filter(|(id, _)| !self.ledger.judged_under_any(&id.key, &id.sha256))
             .map(|(_, end)| *end)
             .collect();
@@ -819,7 +825,8 @@ mod tests {
     }
 
     /// An object evicted between the scan and the read is neither judged nor
-    /// failed, and never charged: the feed goes on to its next object.
+    /// failed, and never charged: the feed goes on to its next object, the
+    /// evicted one takes no slot of the bound and is not left unjudged.
     #[test]
     fn an_object_evicted_before_it_is_read_is_vanished_and_not_failed() {
         let host = host(3);
@@ -854,7 +861,8 @@ mod tests {
             objects_dir: &host.completed,
             site: SITE,
             recorder: RECORDER,
-            max_objects: 0,
+            // The two left, and no more: the evicted one must not take a slot.
+            max_objects: 2,
             feeds: &feeds,
             scratch: &scratch,
             ledger: &mut ledger,
@@ -864,14 +872,34 @@ mod tests {
             failures: &mut failures,
         }
         .run_once(&stop);
-        sink.flush(0).expect("flushed");
         assert!(failures.is_empty(), "nothing is charged: {failures:?}");
         assert_eq!(
-            (pass.judged, pass.failed, pass.vanished),
-            (2, 0, 1),
+            (pass.judged, pass.failed, pass.vanished, pass.unjudged),
+            (2, 0, 1, 0),
             "{errors:?}"
         );
         assert!(errors.is_empty(), "{errors:?}");
+        // The next scan skips a manifest whose object is gone.
+        let (pass, errors) = Judge {
+            objects_dir: &host.completed,
+            site: SITE,
+            recorder: RECORDER,
+            max_objects: 2,
+            feeds: &feeds,
+            scratch: &scratch,
+            ledger: &mut ledger,
+            sink: &mut sink,
+            metrics: &metrics,
+            held: &mut held,
+            failures: &mut failures,
+        }
+        .run_once(&|| false);
+        assert_eq!(
+            (pass.judged, pass.failed, pass.vanished),
+            (0, 0, 0),
+            "{errors:?}"
+        );
+        sink.flush(0).expect("flushed");
         assert_eq!(findings(&rows), 2);
     }
 

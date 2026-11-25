@@ -425,7 +425,9 @@ from `max_objects_per_pass`, which bounds the load; without it the judging takes
 the load's bound. A host whose load already needs most of its bound to keep up
 gives the judging a smaller one, or the load falls behind for as long as there
 is a back-judge to do. An object evicted between the scan and the read is
-`vanished` on the pass line, not `failed`, and is never charged an attempt.
+`vanished` on the pass line, not `failed`. It is not counted against its retry
+limit, takes no slot of `conformance_max_objects_per_pass`, and is not left in
+the unjudged count.
 
 ## Not here yet
 

@@ -1345,6 +1345,21 @@ persist_snapshot_levels = true
             "{}",
             config.summary()
         );
+        // 0 is no bound, as it is for the load, whichever of the two says it.
+        let unbounded_judging = text.replace(
+            "conformance_max_objects_per_pass = 10",
+            "conformance_max_objects_per_pass = 0",
+        );
+        let config = LoaderConfig::parse(&unbounded_judging).expect("parses");
+        assert_eq!(config.loader.max_objects_per_pass, 60);
+        assert_eq!(config.loader.conformance_max_objects(), 0);
+        let unbounded_load = text.replace(
+            "max_objects_per_pass = 60\nconformance_max_objects_per_pass = 10",
+            "max_objects_per_pass = 0",
+        );
+        let config = LoaderConfig::parse(&unbounded_load).expect("parses");
+        assert_eq!(config.loader.conformance_max_objects_per_pass, None);
+        assert_eq!(config.loader.conformance_max_objects(), 0);
     }
 
     /// A configuration with a `[[conformance]]` entry whose tool is a real
