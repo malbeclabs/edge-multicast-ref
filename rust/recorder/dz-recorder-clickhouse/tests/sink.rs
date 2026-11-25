@@ -519,6 +519,7 @@ fn the_base_grain_is_sent_before_the_grains_derived_from_it() {
             Grain::SegmentCoverage,
             Grain::SequenceGap,
             Grain::ConformanceFinding,
+            Grain::ConformanceJudged,
             Grain::Instrument,
             Grain::Event,
             Grain::BookTop
@@ -538,6 +539,31 @@ fn the_base_grain_is_sent_before_the_grains_derived_from_it() {
         .position(|t| t == "recorder.sequence_gap")
         .expect("a gap request");
     assert!(datagram < gap);
+}
+
+/// A judged object's coverage rows are posted, and after its findings.
+///
+/// A coverage row that landed while the findings it counts did not would read
+/// as an object judged clean, so the findings go first; and like the market
+/// data grains before it, a grain carried in the batch and missing from the
+/// sink's destructuring would be credited and dropped.
+#[test]
+fn a_judged_objects_coverage_is_posted_after_its_findings() {
+    let mut rows = batch(10, Fault::None);
+    rows.conformance_finding.push(common::conformance_finding());
+    rows.conformance_judged.push(common::conformance_judged());
+    rows.conformance_judged.push(common::conformance_judged());
+
+    let mut sink = sink(FakeTransport::new());
+    sink.write_batch(rows, NOW).expect("the batch lands");
+    let sent = sink_sent(&sink);
+    let at = |table: &str| {
+        sent.iter()
+            .position(|s| s.table() == table)
+            .unwrap_or_else(|| panic!("no request for {table}"))
+    };
+    assert!(at("recorder.conformance_finding") < at("recorder.conformance_judged"));
+    assert_eq!(sent[at("recorder.conformance_judged")].rows().len(), 2);
 }
 
 /// Nothing is held across objects, so "this object is loaded" is a claim about

@@ -1,7 +1,7 @@
 //! The rows an archive derives into, and the derivation that produces them.
 //!
-//! Four grains — [`Datagram`], [`SegmentCoverage`], [`SequenceGap`],
-//! [`ConformanceFinding`] — plus [`Era`], which is where an era's *opening* is
+//! Five grains — [`Datagram`], [`SegmentCoverage`], [`SequenceGap`],
+//! [`ConformanceFinding`], [`ConformanceJudged`] — plus [`Era`], which is where an era's *opening* is
 //! recorded so that the monotonic index is a rank over openings rather than a
 //! number written into the largest table. Field names are the column names,
 //! exactly, and `tests/column_names.rs` holds every one of them against a
@@ -57,8 +57,9 @@ pub use derive::{
 };
 pub use file::FileSink;
 pub use rows::{
-    absent_if_sentinel, BookStatus, BookTop, ConformanceFinding, Datagram, Derivation, DropScope,
-    Era, Event, FindingVerdict, Grain, Instrument, MessageTypeLabel, Nanos, PortRoleLabel,
-    RecvTsKindLabel, RoleJoinRow, RowBatch, SegmentCoverage, SequenceGap, UncertainReason, Verdict,
+    absent_if_sentinel, BookStatus, BookTop, ConformanceFinding, ConformanceJudged, Datagram,
+    Derivation, DropScope, Era, Event, FindingVerdict, Grain, Instrument, MessageTypeLabel, Nanos,
+    PortRoleLabel, RecvTsKindLabel, RoleJoinRow, RowBatch, SegmentCoverage, SequenceGap,
+    UncertainReason, Verdict,
 };
 pub use sink::{Accepted, Landed, ObjectId, RowSink, RowSinkError, Written};

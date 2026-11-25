@@ -26,11 +26,12 @@
 --
 -- WHAT IT MAY DO, AND WHY EACH GRANT IS THERE
 --
--- INSERT on every table the loader writes, because that is the whole job. Ten
+-- INSERT on every table the loader writes, because that is the whole job. Eleven
 -- of them at the last count, and the count is not the point: the list below is
 -- grouped by the file that declares each table — `001`'s five transport grains,
--- `005`'s three market data tables, `009`'s two venue-side ones — so that a
--- reader checking the list against the schema reads it file by file.
+-- `005`'s three market data tables, `009`'s two venue-side ones, `015`'s
+-- conformance coverage — so that a reader checking the list against the schema
+-- reads it file by file.
 --
 -- THIS FILE IS RE-APPLIED WHENEVER A LATER FILE ADDS A TABLE, and that is a
 -- standing rule rather than a note about one file. The grants stay here, where
@@ -143,3 +144,8 @@ GRANT INSERT ON recorder.book_top TO dz_loader;
 -- not be able to spend twice the day's reads between them.
 GRANT INSERT ON recorder.venue_book_top TO dz_loader;
 GRANT INSERT ON recorder.venue_object TO dz_loader;
+-- The conformance runner's coverage table of `015`, granted here for the same
+-- reason, and `015`'s header says to apply this file again after it. The
+-- runner is part of the loader and writes as this account, beside
+-- `conformance_finding` above.
+GRANT INSERT ON recorder.conformance_judged TO dz_loader;

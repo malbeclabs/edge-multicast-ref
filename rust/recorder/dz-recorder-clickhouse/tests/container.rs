@@ -29,7 +29,7 @@ use common::{
 use dz_edge_core::PortRole;
 use dz_recorder_clickhouse::{migrations, schema, ClickHouseConfig, ClickHouseSink};
 use dz_recorder_replay::Fault;
-use dz_recorder_rows::{Grain, Nanos, RowSink, RowSinkError};
+use dz_recorder_rows::{Grain, Nanos, RowBatch, RowSink, RowSinkError};
 use dz_recorder_venue::{RefusalCount, VenueBookTop, VenueObjectRow};
 
 /// One instant for every sink call in this file.
@@ -45,6 +45,8 @@ const DEFAULT_URL: &str = "http://127.0.0.1:8123";
 const RETENTION: &str = "002_recorder_retention.sql";
 /// Applied a second time by the one test that is about the upgrade path.
 const BOOK_KEY: &str = "010_recorder_book_key.sql";
+/// Applied to a finding table that the released `001` created, twice.
+const SEVERITY: &str = "014_recorder_conformance_severity.sql";
 /// Re-applied by the one test that reconstructs a deployment holding the two
 /// star views this file declares, frozen over tables that had no `derivation`.
 const ERA_RANK: &str = "003_recorder_era_rank.sql";
@@ -237,6 +239,135 @@ fn the_checked_in_ddl_accepts_what_the_loader_sends() {
         assert_eq!(written.accepted.rows(grain), count as u64, "{grain}");
         assert_eq!(scratch.count(grain.table()), count as u64, "{grain}");
     }
+}
+
+/// Two objects that open at the same instant keep their own coverage.
+///
+/// A rotation on a fixed clock opens two objects with one `window_start`, and so
+/// does a recorder restarted inside one tick. Their `conformance_judged` rows
+/// agree on everything but the object, so only `object_key` in the sort key
+/// keeps a merge from replacing one object's counts with the other's.
+#[test]
+fn two_objects_opening_at_one_instant_keep_their_own_coverage() {
+    let mut scratch = Scratch::open("judged_same_start");
+    let first = common::conformance_judged();
+    let mut second = first.clone();
+    second.object_key = format!("{}.second", first.object_key);
+    second.pass = first.pass + 7;
+    for (i, row) in [first, second].into_iter().enumerate() {
+        let rows = RowBatch {
+            object_key: row.object_key.clone(),
+            object_sha256: format!("{i:064}"),
+            conformance_judged: vec![row],
+            ..RowBatch::default()
+        };
+        scratch
+            .sink
+            .write_batch(rows, NOW)
+            .expect("the object lands");
+    }
+    scratch.merge("conformance_judged");
+    assert_eq!(scratch.count("conformance_judged"), 2);
+}
+
+/// Two feeds' channel-grain findings at one instant stay two, each with its
+/// severity and its group, written by the real sink.
+///
+/// Channel grain writes source 0.0.0.0, and two feeds that rotate on one clock
+/// open their windows at one instant, so where they also share a port and a
+/// `Channel ID` their findings for one rule agree on everything `001` first
+/// keyed. Only the group, last in the key, keeps a merge from replacing one
+/// feed's violation with the other's.
+fn two_feeds_findings_at_one_instant_stay_two(scratch: &mut Scratch) {
+    let mut first = common::conformance_finding();
+    first.source_addr = std::net::Ipv4Addr::UNSPECIFIED;
+    first.severity = "should".to_owned();
+    let mut second = first.clone();
+    second.feed = format!("{}-other", first.feed);
+    second.group_addr = std::net::Ipv4Addr::new(233, 84, 178, 9);
+    second.object_key = format!("{}.other", first.object_key);
+    second.severity = "must".to_owned();
+    for (i, row) in [first.clone(), second.clone()].into_iter().enumerate() {
+        let rows = RowBatch {
+            object_key: row.object_key.clone(),
+            object_sha256: format!("{i:064}"),
+            conformance_finding: vec![row],
+            ..RowBatch::default()
+        };
+        scratch
+            .sink
+            .write_batch(rows, NOW)
+            .expect("the finding lands");
+    }
+    scratch.merge("conformance_finding");
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT arrayStringConcat(groupArray(concat(feed, '/', toString(group_addr), '/', severity)), ',') \
+             FROM (SELECT feed, group_addr, severity FROM {}.conformance_finding FINAL ORDER BY feed)",
+            scratch.database
+        )),
+        format!(
+            "{}/{}/should,{}/{}/must",
+            first.feed, first.group_addr, second.feed, second.group_addr
+        ),
+        "a merge folded one feed's finding into the other's, or a column did not land"
+    );
+}
+
+#[test]
+fn two_feeds_findings_at_one_instant_stay_two_on_a_fresh_deployment() {
+    let mut scratch = Scratch::open("finding_two_feeds");
+    two_feeds_findings_at_one_instant_stay_two(&mut scratch);
+}
+
+/// `014` reaches a table `001` created before it, and applying it twice is a
+/// no-op.
+///
+/// The fixture is the current `001` statement with the two columns and the
+/// appended key column taken back out, which is the table a deployment that
+/// applied the released `001` holds. The mutant this kills is a `014` that adds
+/// the group without appending it to the key: the merge below then folds the
+/// two feeds into one row.
+#[test]
+fn the_severity_file_upgrades_the_released_finding_table() {
+    let mut scratch = Scratch::open("finding_upgrade");
+    let created = migrations()
+        .into_iter()
+        .find(|m| m.name == "001_recorder_rows.sql")
+        .expect("001 is checked in")
+        .statements()
+        .into_iter()
+        .find(|s| s.contains("recorder.conformance_finding ("))
+        .expect("001 creates the finding table");
+    let released: String = created
+        .lines()
+        .filter(|l| {
+            let l = l.trim_start();
+            !l.starts_with("--") && !l.starts_with("severity ") && !l.starts_with("group_addr ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .replace(", rule_set_version, group_addr)", ", rule_set_version)")
+        .replace("recorder.", &format!("{}.", scratch.database));
+    assert!(!released.contains("group_addr"), "{released}");
+    scratch.scalar(&format!(
+        "DROP TABLE {}.conformance_finding",
+        scratch.database
+    ));
+    scratch.scalar(&released);
+
+    scratch.apply(SEVERITY);
+    scratch.apply(SEVERITY);
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT sorting_key FROM system.tables WHERE database = '{}' \
+             AND name = 'conformance_finding'",
+            scratch.database
+        )),
+        "rule_id, source_addr, channel_id, dst_port, window_start, site, recorder, \
+         rule_set_version, group_addr"
+    );
+    two_feeds_findings_at_one_instant_stay_two(&mut scratch);
 }
 
 /// A re-run after an analyser fix is a replace and not a duplication.

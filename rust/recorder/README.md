@@ -455,6 +455,7 @@ joined on one identity block:
 |---|---|---|---|
 | **Transport** | `datagram`, `era`, `segment_coverage`, `sequence_gap`, `conformance_finding` | the channel instance — what arrived, and what did not | `001` |
 | **Market data** | `event`, `instrument`, `book_top` | the instrument — what the messages said | `005` |
+| **Conformance coverage** | `conformance_judged` | the judged object and channel instance — what the rule set graded | `015` |
 
 The split is a key, not a category. A sequence number is meaningful only under
 `(source address, Channel ID, destination port)` and a price is meaningful only

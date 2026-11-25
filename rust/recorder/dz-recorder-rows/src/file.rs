@@ -112,6 +112,7 @@ impl RowSink for FileSink {
                 Grain::SegmentCoverage => self.write_rows(grain, &rows.segment_coverage)?,
                 Grain::SequenceGap => self.write_rows(grain, &rows.sequence_gap)?,
                 Grain::ConformanceFinding => self.write_rows(grain, &rows.conformance_finding)?,
+                Grain::ConformanceJudged => self.write_rows(grain, &rows.conformance_judged)?,
                 Grain::Event => self.write_rows(grain, &rows.event)?,
                 Grain::Instrument => self.write_rows(grain, &rows.instrument)?,
                 Grain::BookTop => self.write_rows(grain, &rows.book_top)?,

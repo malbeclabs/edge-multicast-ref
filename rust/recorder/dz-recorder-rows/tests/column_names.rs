@@ -16,9 +16,10 @@
 use std::net::Ipv4Addr;
 
 use dz_recorder_rows::{
-    absent_if_sentinel, BookStatus, BookTop, ConformanceFinding, Datagram, Derivation, DropScope,
-    Era, Event, FindingVerdict, Grain, MessageTypeLabel, Nanos, PortRoleLabel, RecvTsKindLabel,
-    RoleJoinRow, SegmentCoverage, SequenceGap, UncertainReason, Verdict,
+    absent_if_sentinel, BookStatus, BookTop, ConformanceFinding, ConformanceJudged, Datagram,
+    Derivation, DropScope, Era, Event, FindingVerdict, Grain, MessageTypeLabel, Nanos,
+    PortRoleLabel, RecvTsKindLabel, RoleJoinRow, SegmentCoverage, SequenceGap, UncertainReason,
+    Verdict,
 };
 use serde_json::{json, Value};
 
@@ -437,11 +438,13 @@ fn a_conformance_finding_row_carries_exactly_the_finding_columns() {
     let row = ConformanceFinding {
         run_ts: Nanos(1_700_000_100_000_000_000),
         rule_id: "seq-continuity".to_owned(),
+        severity: "must".to_owned(),
         rule_set_version: "1.4.0".to_owned(),
         site: "site-1".to_owned(),
         recorder: "recorder-1".to_owned(),
         env: "test".to_owned(),
         feed: "top-of-book".to_owned(),
+        group_addr: GROUP,
         port_role: PortRoleLabel::Refdata,
         source_addr: SOURCE,
         channel_id: 1,
@@ -461,11 +464,13 @@ fn a_conformance_finding_row_carries_exactly_the_finding_columns() {
         json!({
             "run_ts": 1_700_000_100_000_000_000u64,
             "rule_id": "seq-continuity",
+            "severity": "must",
             "rule_set_version": "1.4.0",
             "site": "site-1",
             "recorder": "recorder-1",
             "env": "test",
             "feed": "top-of-book",
+            "group_addr": "233.252.0.10",
             "port_role": "refdata",
             "source_addr": "192.0.2.10",
             "channel_id": 1,
@@ -478,6 +483,62 @@ fn a_conformance_finding_row_carries_exactly_the_finding_columns() {
             "derivation": "archive",
             "first_seq": 0,
             "last_seq": 99,
+        })
+    );
+}
+
+#[test]
+fn a_conformance_judged_row_carries_exactly_the_judged_columns() {
+    let row = ConformanceJudged {
+        run_ts: Nanos(1_700_000_100_000_000_000),
+        rule_set_version: "1.4.0".to_owned(),
+        site: "site-1".to_owned(),
+        recorder: "recorder-1".to_owned(),
+        env: "test".to_owned(),
+        feed: "top-of-book".to_owned(),
+        group_addr: GROUP,
+        source_addr: SOURCE,
+        channel_id: 1,
+        dst_port: 40_001,
+        window_start: Nanos(1_700_000_000_000_000_000),
+        window_end: Nanos(1_700_000_060_000_000_000),
+        object_key: KEY.to_owned(),
+        derivation: Derivation::Archive,
+        pass: 1,
+        violation: 2,
+        unverifiable: 3,
+        na: 4,
+        violation_must: 1,
+        violation_should: 0,
+        violation_info: 0,
+        refused: 5,
+    };
+
+    assert_eq!(
+        as_json(&row),
+        json!({
+            "run_ts": 1_700_000_100_000_000_000u64,
+            "rule_set_version": "1.4.0",
+            "site": "site-1",
+            "recorder": "recorder-1",
+            "env": "test",
+            "feed": "top-of-book",
+            "group_addr": "233.252.0.10",
+            "source_addr": "192.0.2.10",
+            "channel_id": 1,
+            "dst_port": 40_001,
+            "window_start": 1_700_000_000_000_000_000u64,
+            "window_end": 1_700_000_060_000_000_000u64,
+            "object_key": KEY,
+            "derivation": "archive",
+            "pass": 1,
+            "violation": 2,
+            "unverifiable": 3,
+            "na": 4,
+            "violation_must": 1,
+            "violation_should": 0,
+            "violation_info": 0,
+            "refused": 5,
         })
     );
 }
@@ -550,6 +611,7 @@ fn a_grain_names_its_table_once() {
             "segment_coverage",
             "sequence_gap",
             "conformance_finding",
+            "conformance_judged",
             "event",
             "instrument",
             "book_top"

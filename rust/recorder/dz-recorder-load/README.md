@@ -412,12 +412,24 @@ it would stop at is the one closest to eviction.
 A `[[conformance]]` entry runs the specification's rule set over every object
 of that feed and writes `conformance_finding` (see `loader.example.toml`). By
 default only `violation` rows are written; `verdicts = "all"` writes every
-verdict. Without passes, an object with no row was either not judged, or
+verdict. Without passes, an object with no finding row was either not judged, or
 judged with no verdict left a violation, which is not proof that it is clean: an
-unverifiable or `na` verdict writes no row either. Only the conformance ledger
-on this host says which objects were judged. The
+unverifiable or `na` verdict writes no row either. The
 design, and what writing only violations gives up, is in
 `docs/superpowers/specs/2026-09-06-recorder-conformance-runner-design.md`.
+
+What tells the two apart is `conformance_judged`, written for every object the
+runner judges whatever `verdicts` says: one row per channel instance the
+object's verdicts were placed on, counting `pass`, `violation`, `unverifiable`
+and `na` per rule, the violations split by severity, and the verdicts it could
+not place. An object that placed nothing still writes one row at zero; an
+object the runner gave up on writes none. Each finding row also carries the
+rule set's `severity` for it and the `group_addr` the manifest joined its port
+role and port in. Apply migrations `014` and `015`, then re-apply `004` for the
+new table's grant, **before** rolling a loader that writes them: the sink
+refuses unknown columns and tables, so the other order stalls every judged
+batch until the schema catches up. The design is in
+`docs/superpowers/specs/2026-11-25-conformance-judged-rows-design.md`.
 
 The judging runs after the load in each pass, in the same loop, so every object
 judged delays the next load. `conformance_max_objects_per_pass` bounds it apart

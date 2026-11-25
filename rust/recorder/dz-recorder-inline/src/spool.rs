@@ -84,8 +84,9 @@ use std::path::{Path, PathBuf};
 use dz_recorder_load::ledger::{Entry, Ledger};
 use dz_recorder_load::now_unix_nanos;
 use dz_recorder_rows::{
-    BookTop, ConformanceFinding, Datagram, Derivation, Era, Event, FileSink, Grain, Instrument,
-    ObjectId, RowBatch, RowSink as _, RowSinkError, SegmentCoverage, SegmentTrailer, SequenceGap,
+    BookTop, ConformanceFinding, ConformanceJudged, Datagram, Derivation, Era, Event, FileSink,
+    Grain, Instrument, ObjectId, RowBatch, RowSink as _, RowSinkError, SegmentCoverage,
+    SegmentTrailer, SequenceGap,
 };
 
 /// What one call to [`Spool::record_landed`] did.
@@ -812,6 +813,11 @@ impl Spool {
                 Grain::ConformanceFinding,
                 rows(Grain::ConformanceFinding),
             )?,
+            conformance_judged: parse_rows::<ConformanceJudged>(
+                name,
+                Grain::ConformanceJudged,
+                rows(Grain::ConformanceJudged),
+            )?,
             event: parse_rows::<Event>(name, Grain::Event, rows(Grain::Event))?,
             instrument: parse_rows::<Instrument>(name, Grain::Instrument, rows(Grain::Instrument))?,
             book_top: parse_rows::<BookTop>(name, Grain::BookTop, rows(Grain::BookTop))?,
@@ -995,7 +1001,7 @@ fn sync_grain_files(dir: &Path) -> Result<Vec<GrainDigest>, SpoolError> {
             Ok(content) => content,
             // A grain that produced no rows leaves no file, which is the file
             // sink's own rule and is why the sidecar lists what exists rather
-            // than all eight.
+            // than all nine.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(source) => return Err(SpoolError::Io { path, source }),
         };

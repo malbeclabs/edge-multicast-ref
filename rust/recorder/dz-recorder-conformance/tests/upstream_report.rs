@@ -5,8 +5,9 @@
 //! b9ff080b4019b48c48e021728b9d842d18bb1439. The fixtures beside it are the shape
 //! this repository asked for; this one is the shape that arrived, and the test
 //! is that the two are the same interface: every entry parses, the fields the
-//! rule set adds beyond the ask are tolerated rather than refused, and an entry
-//! the rule set places on no instance arrives as one with none.
+//! rule set adds beyond the ask are tolerated rather than refused, an entry
+//! the rule set places on no instance arrives as one with none, and the
+//! severity it states on every entry is read rather than dropped.
 
 use dz_recorder_conformance::report::{Outcome, RuleSetReport};
 
@@ -61,4 +62,34 @@ fn the_rule_sets_own_placed_report_parses_as_the_declared_shape() {
         .all(|e| e.era_index.is_some()));
     assert!(report.rules.iter().all(|r| !r.overflow));
     assert_eq!(report.unplaced_findings, 0);
+
+    // Every entry states its severity, and the report spells it lower-case.
+    let severities: std::collections::BTreeSet<&str> = report
+        .rules
+        .iter()
+        .map(|r| {
+            r.severity
+                .as_deref()
+                .expect("every entry states a severity")
+        })
+        .collect();
+    assert_eq!(
+        severities,
+        ["info", "must"].into_iter().collect(),
+        "the fixture's severities"
+    );
+}
+
+/// A report that states no severity parses as it did before the field was
+/// read, and says nothing about one.
+#[test]
+fn a_report_that_states_no_severity_still_parses() {
+    let bytes = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/report-violation.json"),
+    )
+    .expect("the fixture is checked in");
+    let report = RuleSetReport::from_json(&bytes).expect("the report parses");
+    assert!(!report.rules.is_empty());
+    assert!(report.rules.iter().all(|r| r.severity.is_none()));
 }

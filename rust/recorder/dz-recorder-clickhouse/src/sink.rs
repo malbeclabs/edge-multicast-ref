@@ -134,6 +134,7 @@ impl Held {
             segment_coverage,
             sequence_gap,
             conformance_finding,
+            conformance_judged,
             event,
             instrument,
             book_top,
@@ -143,6 +144,7 @@ impl Held {
         self.rows.segment_coverage.extend(segment_coverage);
         self.rows.sequence_gap.extend(sequence_gap);
         self.rows.conformance_finding.extend(conformance_finding);
+        self.rows.conformance_judged.extend(conformance_judged);
         self.rows.event.extend(event);
         self.rows.instrument.extend(instrument);
         self.rows.book_top.extend(book_top);
@@ -436,6 +438,9 @@ impl<T: Transport> ClickHouseSink<T> {
                 Grain::ConformanceFinding => {
                     self.write_grain(grain, &rows.conformance_finding, &objects)?
                 }
+                Grain::ConformanceJudged => {
+                    self.write_grain(grain, &rows.conformance_judged, &objects)?
+                }
                 Grain::Instrument => self.write_grain(grain, &rows.instrument, &objects)?,
                 Grain::Event => self.write_grain(grain, &rows.event, &objects)?,
                 Grain::BookTop => self.write_grain(grain, &rows.book_top, &objects)?,
@@ -540,6 +545,12 @@ pub const fn send_order() -> [Grain; Grain::COUNT] {
         Grain::SegmentCoverage,
         Grain::SequenceGap,
         Grain::ConformanceFinding,
+        // After the findings it counts, for the reason the gap rows follow the
+        // datagram rows: a coverage row says the object was judged, and one that
+        // landed while the findings beside it did not would read as an object
+        // judged clean. The other way round, findings with no coverage row read
+        // as not judged yet, which is what the retry that follows makes true.
+        Grain::ConformanceJudged,
         // The market data grains follow the transport ones for the same reason
         // the gap rows follow the datagram rows: `book_top` is derived from
         // `event`, and `event` joins to `instrument`. A book state present with

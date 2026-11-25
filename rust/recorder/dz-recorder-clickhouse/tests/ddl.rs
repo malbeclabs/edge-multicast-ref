@@ -139,6 +139,17 @@ fn book_key_sql() -> &'static str {
     sql_of("010_recorder_book_key.sql")
 }
 
+/// A finding's severity and group, added to a deployment that applied `001`
+/// before them, which is `014`.
+fn conformance_severity_sql() -> &'static str {
+    sql_of("014_recorder_conformance_severity.sql")
+}
+
+/// The conformance runner's coverage table, which is `015`.
+fn conformance_judged_sql() -> &'static str {
+    sql_of("015_recorder_conformance_judged.sql")
+}
+
 /// One `CREATE OR REPLACE VIEW recorder.<name>` statement, up to the next one.
 fn view_body(sql: &'static str, name: &str) -> &'static str {
     let needle = format!("CREATE OR REPLACE VIEW recorder.{name} AS");
@@ -249,6 +260,11 @@ fn every_column_has_a_field_and_every_field_has_a_column() {
             rows_sql(),
             Grain::ConformanceFinding,
             field_names(&fixtures::conformance_finding()),
+        ),
+        (
+            conformance_judged_sql(),
+            Grain::ConformanceJudged,
+            field_names(&fixtures::conformance_judged()),
         ),
         (
             market_data_sql(),
@@ -1320,6 +1336,114 @@ fn the_venue_file_tells_an_operator_to_re_apply_the_account_file() {
     );
 }
 
+/// **`014` adds to `conformance_finding` exactly what `001` declares on it.**
+///
+/// `001`'s `CREATE TABLE` is what the row type is held against, so a deployment
+/// created from scratch has both columns before `014` runs; `014`'s `ALTER`s are
+/// what reach a deployment that applied `001` before them. The two have to agree
+/// on the type and the default, or an upgraded table and a fresh one read an old
+/// row differently, and the default is the documented meaning of a row written
+/// before the column: unknown severity, no group.
+#[test]
+fn the_severity_file_adds_the_columns_001_declares() {
+    let sql = conformance_severity_sql();
+    for (column, after) in [("severity", "rule_id"), ("group_addr", "feed")] {
+        let declared = column_type(rows_sql(), "conformance_finding", column);
+        let declared = declared.trim_end_matches(',');
+        assert!(
+            sql.contains(&format!(
+                "ADD COLUMN IF NOT EXISTS {column} {declared}\n    AFTER {after}"
+            )),
+            "`014` does not add `{column} {declared}` after `{after}` as `001` \
+             declares it"
+        );
+    }
+    assert!(
+        sql.contains("APPLY THIS FILE BEFORE THE BINARY THAT WRITES THE COLUMNS")
+            && sql.contains("input_format_skip_unknown_fields"),
+        "the order a deploy has to take is not stated where an operator applies \
+         the file"
+    );
+    // The severity is in no key: it is the rule set version's, so a row
+    // re-written with it changed must replace the old one, not stand beside it.
+    //
+    // The group is last in it, in `001` and in `014` alike, so two feeds'
+    // channel-grain findings on one port at one instant stay two rows, and an
+    // upgraded table and a fresh one collapse the same rows.
+    let key = sort_key(rows_sql(), "conformance_finding");
+    assert!(!key.contains("severity"), "severity reached the key: {key}");
+    let expected = "rule_id, source_addr, channel_id, dst_port, window_start, site, recorder, \
+                    rule_set_version, group_addr";
+    assert_eq!(key, expected);
+    assert!(
+        sql.contains(&format!("MODIFY ORDER BY ({expected});")),
+        "`014` does not append the group to the key `001` declares"
+    );
+    // ClickHouse refuses to append a column with a default expression to a
+    // key, so the column relies on the type's own default, 0.0.0.0.
+    assert_eq!(
+        column_type(rows_sql(), "conformance_finding", "group_addr").trim_end_matches(','),
+        "IPv4"
+    );
+}
+
+/// **`015` tells an operator to re-apply `004`, and quotes the grant `004`
+/// writes.**
+///
+/// The same pairing `009` holds for the venue tables, and for the same reason:
+/// the grant is asserted as a substring of `004` and never executed by the
+/// container suite, so the instruction written at both ends is what stands
+/// between a partial apply and a runner whose first batch is refused.
+#[test]
+fn the_judged_file_tells_an_operator_to_re_apply_the_account_file() {
+    let sql = conformance_judged_sql();
+    let user = migration("004_recorder_loader_user.sql").sql;
+    assert!(sql.contains("RE-APPLY `004` AFTER THIS FILE"));
+    assert!(sql.contains("004_recorder_loader_user.sql"));
+    assert!(sql.contains("Not enough privileges"));
+    let statement = format!(
+        "GRANT INSERT ON recorder.{} TO dz_loader;",
+        Grain::ConformanceJudged.table()
+    );
+    assert!(
+        sql.contains(&statement),
+        "`015` does not quote its grant: {statement}"
+    );
+    assert!(
+        user.contains(&statement),
+        "`015` quotes a grant `004` does not write: {statement}"
+    );
+    // No TTL, stated rather than inferred from the absence of a line, as `002`
+    // does for the derived grains of `001`.
+    assert!(
+        !sql.lines()
+            .filter(|l| !l.trim_start().starts_with("--"))
+            .any(|l| l.contains("TTL")),
+        "the coverage table must not expire"
+    );
+    assert!(sql.contains("NO TTL"), "its absence of a TTL is not stated");
+}
+
+/// **The coverage table is keyed on the instance and the group, and on no
+/// rule.**
+///
+/// One row per instance per run is what the runner writes, so the key has to
+/// hold everything that tells two of a run's rows apart and nothing that a
+/// re-run would change: the group leads beside the feed because that is what a
+/// reader keys a feed on, the object because two objects can open at the same
+/// instant and each keeps its own counts, and the site, the recorder and the
+/// rule set version are in it for the reasons `001` gives for the finding table.
+#[test]
+fn the_judged_sort_key_is_the_one_its_rows_were_shaped_for() {
+    let sql = conformance_judged_sql();
+    assert_eq!(
+        sort_key(sql, "conformance_judged"),
+        "feed, group_addr, source_addr, channel_id, dst_port, window_start, object_key, site, \
+         recorder, rule_set_version"
+    );
+    assert!(sql.contains("ENGINE = ReplacingMergeTree(run_ts)"));
+}
+
 /// The `ORDER BY (...)` of one table, as one line.
 ///
 /// The key may wrap, so this joins until the closing parenthesis rather than
@@ -1817,6 +1941,7 @@ fn sql_declaring(grain: Grain) -> &'static str {
         | Grain::SegmentCoverage
         | Grain::SequenceGap
         | Grain::ConformanceFinding => rows_sql(),
+        Grain::ConformanceJudged => conformance_judged_sql(),
     }
 }
 
@@ -1881,6 +2006,7 @@ fn provenance_is_on_every_grain_and_in_no_sort_key() {
         cross_site_sql(),
         venue_sql(),
         book_key_sql(),
+        conformance_judged_sql(),
     ] {
         for clause in sort_key_clauses(sql) {
             clauses += 1;
@@ -1893,12 +2019,12 @@ fn provenance_is_on_every_grain_and_in_no_sort_key() {
     // The walker found something, and found all of it. A guard that reads more
     // than one line is a guard whose *reading* is now the thing that can
     // regress, and a walker that quietly went back to the first line would leave
-    // this green over exactly the hazard it was widened for. Thirteen: the ten
-    // table sort keys, plus the bare `ORDER BY` in each of `006`'s, `009`'s and
-    // `010`'s window specifications, which are checked like any other because a
-    // column reaching a window's ordering is worth knowing about too. `003`'s is
-    // in a file this test does not read.
-    assert_eq!(clauses, 13, "the sort-key walker stopped finding clauses");
+    // this green over exactly the hazard it was widened for. Fourteen: the
+    // eleven table sort keys, plus the bare `ORDER BY` in each of `006`'s,
+    // `009`'s and `010`'s window specifications, which are checked like any
+    // other because a column reaching a window's ordering is worth knowing
+    // about too. `003`'s is in a file this test does not read.
+    assert_eq!(clauses, 14, "the sort-key walker stopped finding clauses");
 }
 
 /// Every `ORDER BY` and `PRIMARY KEY` clause in one file, each as one string.
@@ -1997,6 +2123,11 @@ fn every_table_is_partitioned_by_a_day() {
             Grain::ConformanceFinding,
             "toYYYYMMDD(window_start)",
         ),
+        (
+            conformance_judged_sql(),
+            Grain::ConformanceJudged,
+            "toYYYYMMDD(window_start)",
+        ),
         (market_data_sql(), Grain::Event, "toYYYYMMDD(recv_ts)"),
         (
             market_data_sql(),
@@ -2037,6 +2168,11 @@ fn every_table_is_partitioned_by_a_day() {
         partition_clauses(venue_sql()),
         VENUE_GRAINS.len(),
         "a table in 009 has no PARTITION BY, or one has two"
+    );
+    assert_eq!(
+        partition_clauses(conformance_judged_sql()),
+        1,
+        "the table in 015 has no PARTITION BY, or it has two"
     );
 }
 
@@ -3362,9 +3498,9 @@ mod fixtures {
     use dz_recorder_venue::{RefusalCount, VenueBookTop, VenueObjectRow};
 
     use dz_recorder_rows::{
-        BookStatus, BookTop, ConformanceFinding, Datagram, Derivation, DropScope, Era, Event,
-        FindingVerdict, Instrument, MessageTypeLabel, Nanos, PortRoleLabel, RecvTsKindLabel,
-        SegmentCoverage, SequenceGap, UncertainReason, Verdict,
+        BookStatus, BookTop, ConformanceFinding, ConformanceJudged, Datagram, Derivation,
+        DropScope, Era, Event, FindingVerdict, Instrument, MessageTypeLabel, Nanos, PortRoleLabel,
+        RecvTsKindLabel, SegmentCoverage, SequenceGap, UncertainReason, Verdict,
     };
 
     const ADDR: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 10);
@@ -3654,11 +3790,13 @@ mod fixtures {
         ConformanceFinding {
             run_ts: Nanos(0),
             rule_id: String::new(),
+            severity: String::new(),
             rule_set_version: String::new(),
             site: String::new(),
             recorder: String::new(),
             env: String::new(),
             feed: String::new(),
+            group_addr: ADDR,
             port_role: PortRoleLabel::Mktdata,
             source_addr: ADDR,
             channel_id: 0,
@@ -3671,6 +3809,33 @@ mod fixtures {
             derivation: Derivation::Archive,
             first_seq: 0,
             last_seq: 0,
+        }
+    }
+
+    pub fn conformance_judged() -> ConformanceJudged {
+        ConformanceJudged {
+            run_ts: Nanos(0),
+            rule_set_version: String::new(),
+            site: String::new(),
+            recorder: String::new(),
+            env: String::new(),
+            feed: String::new(),
+            group_addr: ADDR,
+            source_addr: ADDR,
+            channel_id: 0,
+            dst_port: 0,
+            window_start: Nanos(0),
+            window_end: Nanos(0),
+            object_key: String::new(),
+            derivation: Derivation::Archive,
+            pass: 0,
+            violation: 0,
+            unverifiable: 0,
+            na: 0,
+            violation_must: 0,
+            violation_should: 0,
+            violation_info: 0,
+            refused: 0,
         }
     }
 }
