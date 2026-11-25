@@ -648,6 +648,16 @@ mod tests {
             .unwrap_or(0)
     }
 
+    fn judged(rows: &Path) -> Vec<dz_recorder_rows::ConformanceJudged> {
+        std::fs::read_to_string(FileSink::path_in(rows, Grain::ConformanceJudged))
+            .map(|t| {
+                t.lines()
+                    .map(|l| serde_json::from_str(l).expect("a judged row"))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// The datagram rows a load writes are the same bytes whether or not a
     /// feed is judged beside it; the only thing judging adds is the findings
     /// file, and a configuration that judges nothing adds nothing at all.
@@ -673,7 +683,7 @@ mod tests {
         assert_eq!(pass, JudgePass::default(), "no feed, no work");
 
         for grain in Grain::ALL {
-            if grain == Grain::ConformanceFinding {
+            if grain == Grain::ConformanceFinding || grain == Grain::ConformanceJudged {
                 continue;
             }
             assert_eq!(
@@ -735,6 +745,13 @@ mod tests {
         assert_eq!((pass.judged, pass.recorded, pass.unjudged), (2, 2, 0));
         assert_eq!(ledger.entries(), 2, "a clean object is ledgered");
         assert_eq!(findings(&rows), 0, "a pass writes no row");
+        let coverage = judged(&rows);
+        assert_eq!(
+            coverage.len(),
+            2,
+            "and each object still says it was judged: {coverage:#?}"
+        );
+        assert!(coverage.iter().all(|j| (j.pass, j.violation) == (1, 0)));
 
         let (pass, _) = judge_pass(&clean_host, &rows, &feeds, &mut ledger, &metrics, 0);
         assert_eq!(pass.judged, 0, "and is not judged again");
@@ -982,6 +999,21 @@ mod tests {
             findings(&rows),
             2,
             "no finding vouches for the refused object"
+        );
+        // Nor a coverage row: it was not judged, and a row would say it was.
+        let coverage = judged(&rows);
+        assert_eq!(coverage.len(), 2, "{coverage:#?}");
+        let given_up: Vec<String> = std::fs::read_to_string(&ledger_path)
+            .expect("the ledger")
+            .lines()
+            .map(|l| serde_json::from_str::<JudgeEntry>(l).expect("an entry"))
+            .filter(|e| e.refused.is_some())
+            .map(|e| e.object_key)
+            .collect();
+        assert_eq!(given_up.len(), 1, "one object was given up on");
+        assert!(
+            coverage.iter().all(|j| !given_up.contains(&j.object_key)),
+            "a given-up object has a coverage row"
         );
     }
 

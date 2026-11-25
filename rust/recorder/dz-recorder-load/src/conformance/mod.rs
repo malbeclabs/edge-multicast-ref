@@ -1,5 +1,6 @@
 //! The conformance runner: the specification's own rule set, run over completed
-//! objects, and its verdicts kept in `conformance_finding`.
+//! objects, its verdicts kept in `conformance_finding`, and what it judged in
+//! `conformance_judged`.
 //!
 //! The judgement is not made here. The rule set lives in `edge-feed-spec`, is a
 //! binary this repository does not build, and is reached through
@@ -91,9 +92,10 @@ impl ConformanceRefusal {
 ///
 /// The table has no TTL, and a row for every rule on every instance of every
 /// object is mostly passes. By default only violations are written. An object
-/// with no row was then either not judged, or judged with no verdict left a
-/// violation; an unverifiable or `na` verdict writes no row. The judge ledger,
-/// not the table, records which objects were judged.
+/// with no finding row was then either not judged, or judged with no verdict
+/// left a violation; an unverifiable or `na` verdict writes no row. Which of the
+/// two is `conformance_judged`'s to say: it is written for every judged object
+/// whatever this is set to, and counts every verdict this would drop.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum KeptVerdicts {

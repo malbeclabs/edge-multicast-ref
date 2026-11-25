@@ -368,6 +368,30 @@ pub fn role_on(manifest: &SegmentManifest, group: Ipv4Addr, port: u16) -> Option
         .and_then(|j| role_named(&j.role))
 }
 
+/// The group the manifest joined `role` on `port` in, which is what a row
+/// states as its `group_addr`.
+///
+/// The pair `segment_coverage.roles_joined` records, read the other way. A row
+/// carries no group of its own — the finding table's key has none, and one
+/// instance judged in two groups is one row — so the group is the manifest's
+/// answer for the row's role and port, and `0.0.0.0` where it names no group
+/// for that pair or more than one: a reader must not be handed a guess.
+#[must_use]
+pub fn joined_group(manifest: &SegmentManifest, role: PortRole, port: u16) -> Ipv4Addr {
+    let mut groups: Vec<Ipv4Addr> = manifest
+        .roles_joined
+        .iter()
+        .filter(|j| j.port == port && role_named(&j.role) == Some(role))
+        .map(|j| j.group)
+        .collect();
+    groups.sort_unstable();
+    groups.dedup();
+    match groups[..] {
+        [group] => group,
+        _ => Ipv4Addr::UNSPECIFIED,
+    }
+}
+
 /// Why a rule that needed `role` did not run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unrun {
@@ -811,6 +835,7 @@ pub(crate) mod tests {
         RuleOutcome {
             rule_id: rule_id.to_owned(),
             outcome,
+            severity: None,
             instance: port.map(|dst_port| ReportInstance {
                 source_addr: SOURCE_IP,
                 channel_id: 1,
@@ -1258,6 +1283,7 @@ mod downgrade_tests {
         RuleOutcome {
             rule_id: "TEST.RULE".to_owned(),
             outcome,
+            severity: None,
             instance: Some(ReportInstance {
                 source_addr: PRIMARY_SOURCE,
                 channel_id: CHANNEL_ID,

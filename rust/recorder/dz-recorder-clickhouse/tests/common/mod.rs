@@ -19,8 +19,9 @@ use dz_recorder_core::{CaptureDropScope, RecorderIdentity};
 use dz_recorder_replay::synthetic::{port_for, SyntheticPublisher, GROUP};
 use dz_recorder_replay::Fault;
 use dz_recorder_rows::{
-    derive_object, BookTop, Datagram, Derivation, DropScope, Era, Nanos, PortRoleLabel,
-    RecvTsKindLabel, RoleJoinRow, RowBatch, SegmentCoverage, SequenceGap, UncertainReason, Verdict,
+    derive_object, BookTop, ConformanceFinding, ConformanceJudged, Datagram, Derivation, DropScope,
+    Era, FindingVerdict, Nanos, PortRoleLabel, RecvTsKindLabel, RoleJoinRow, RowBatch,
+    SegmentCoverage, SequenceGap, UncertainReason, Verdict,
 };
 use dz_recorder_venue::VenueBookTop;
 
@@ -240,6 +241,65 @@ fn build(publisher: SyntheticPublisher, role: PortRole) -> RowBatch {
 
 /// A wait that does not wait, so the retry tests are instant.
 pub fn no_wait(_: Duration) {}
+
+/// One finding row, as the conformance runner writes it. No derivation over an
+/// archive writes one, so a test that needs one states it.
+#[must_use]
+pub fn conformance_finding() -> ConformanceFinding {
+    ConformanceFinding {
+        run_ts: Nanos(NOW),
+        rule_id: "TEST.A".to_owned(),
+        severity: "must".to_owned(),
+        rule_set_version: "v1+abc".to_owned(),
+        site: "site-1".to_owned(),
+        recorder: "recorder-1".to_owned(),
+        env: "test".to_owned(),
+        feed: "top-of-book".to_owned(),
+        group_addr: GROUP,
+        port_role: PortRoleLabel::Mktdata,
+        source_addr: std::net::Ipv4Addr::new(192, 0, 2, 10),
+        channel_id: 1,
+        dst_port: port_for(PortRole::Mktdata),
+        window_start: Nanos(NOW),
+        window_end: Nanos(NOW + SECOND_NS),
+        verdict: FindingVerdict::Violation,
+        detail: "a violation".to_owned(),
+        object_key: "feed=top-of-book/obj-1".to_owned(),
+        derivation: Derivation::Archive,
+        first_seq: 1,
+        last_seq: 2,
+    }
+}
+
+/// The coverage row for [`conformance_finding`]'s object and instance.
+#[must_use]
+pub fn conformance_judged() -> ConformanceJudged {
+    let f = conformance_finding();
+    ConformanceJudged {
+        run_ts: f.run_ts,
+        rule_set_version: f.rule_set_version,
+        site: f.site,
+        recorder: f.recorder,
+        env: f.env,
+        feed: f.feed,
+        group_addr: f.group_addr,
+        source_addr: f.source_addr,
+        channel_id: f.channel_id,
+        dst_port: f.dst_port,
+        window_start: f.window_start,
+        window_end: f.window_end,
+        object_key: f.object_key,
+        derivation: f.derivation,
+        pass: 3,
+        violation: 1,
+        unverifiable: 0,
+        na: 1,
+        violation_must: 1,
+        violation_should: 0,
+        violation_info: 0,
+        refused: 0,
+    }
+}
 
 /// The equivalence key the fixtures below pair on.
 ///

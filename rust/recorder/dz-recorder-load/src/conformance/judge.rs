@@ -25,7 +25,7 @@ use dz_recorder_rows::{DeriveError, RowBatch};
 use thiserror::Error;
 
 use super::findings::{place, role_named, Carried, HoleFinder, Holes, Refused};
-use super::rows::{finding_rows, RunStamp};
+use super::rows::{finding_rows, judged_rows, RunStamp};
 use super::KeptVerdicts;
 
 #[derive(Debug, Error)]
@@ -157,8 +157,8 @@ pub struct JudgeInput<'a, R> {
 /// One object's verdicts, and what could not be placed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Judged {
-    /// `conformance_finding` only; every other grain is empty, and stays the
-    /// load's to write.
+    /// `conformance_finding` and `conformance_judged` only; every other grain is
+    /// empty, and stays the load's to write.
     pub batch: RowBatch,
     pub refused: Refused,
     /// Runs of the rule set, which is groups in the object.
@@ -241,18 +241,27 @@ pub fn judge_object<R: RuleSet>(input: &JudgeInput<'_, R>) -> Result<Judged, Jud
         refused.add(&r);
         placed.extend(p);
     }
+    let findings = finding_rows(&stamp, &placed);
+    // Counted before any verdict is dropped, so the coverage is the same
+    // whatever `verdicts` says, and a clean object judged under the default
+    // still has a row that says it was judged.
+    let judged = judged_rows(&stamp, &findings, refused.total());
     // The kept verdicts are chosen after the reduction, so a violation still wins
     // over a pass of the same rule and instance, and a violation a hole
     // downgraded to unverifiable is not kept as a violation.
-    let rows: Vec<_> = finding_rows(&stamp, &placed)
+    let rows: Vec<_> = findings
         .into_iter()
         .filter(|row| input.verdicts.keeps(row.verdict))
         .collect();
     Ok(Judged {
+        // One batch, so the findings and the coverage that counts them land
+        // together or not at all: a coverage row without its findings would
+        // read as an object judged clean.
         batch: RowBatch {
             object_key: manifest.object_key.clone(),
             object_sha256: manifest.sha256.clone(),
             conformance_finding: rows,
+            conformance_judged: judged,
             ..RowBatch::default()
         },
         refused,
@@ -434,6 +443,7 @@ pub(crate) mod tests {
         RuleOutcome {
             rule_id: rule.to_owned(),
             outcome,
+            severity: None,
             instance: Some(ReportInstance {
                 source_addr: PRIMARY_SOURCE,
                 channel_id: CHANNEL_ID,
@@ -510,6 +520,42 @@ pub(crate) mod tests {
                 ("TEST.VIOLATION", FindingVerdict::Violation),
             ],
             "{rows:#?}"
+        );
+    }
+
+    /// The coverage does not depend on which verdicts are kept. A clean object
+    /// under the default writes no finding row and still writes the row that
+    /// says it was judged, with the same counts it has when every verdict is
+    /// kept, and in the same batch.
+    #[test]
+    fn the_coverage_is_written_whatever_verdicts_are_kept() {
+        let (_dir, recorded) = record(&SyntheticPublisher::clean(200));
+        let scratch = tempfile::tempdir().expect("scratch");
+        let stub = || {
+            StubRuleSet::stating(vec![
+                on_mktdata("TEST.PASS", Outcome::Pass, 0, 199),
+                on_mktdata("TEST.NA", Outcome::Na, 0, 199),
+            ])
+        };
+        let default = judge_keeping(&recorded, stub(), scratch.path(), KeptVerdicts::default())
+            .expect("judged")
+            .batch;
+        assert!(default.conformance_finding.is_empty(), "nothing violated");
+        assert_eq!(default.conformance_judged.len(), 1, "{default:#?}");
+        let j = &default.conformance_judged[0];
+        assert_eq!((j.pass, j.violation, j.unverifiable, j.na), (1, 0, 0, 1));
+        assert_eq!(j.object_key, recorded.manifest.object_key);
+        assert_eq!(j.rule_set_version, VERSION);
+        assert_eq!(j.dst_port, port_for(PortRole::Mktdata));
+        assert_eq!(j.group_addr, dz_recorder_replay::synthetic::GROUP);
+
+        let all = judge_keeping(&recorded, stub(), scratch.path(), KeptVerdicts::All)
+            .expect("judged")
+            .batch;
+        assert_eq!(all.conformance_finding.len(), 2);
+        assert_eq!(
+            all.conformance_judged, default.conformance_judged,
+            "the same coverage under either setting"
         );
     }
 
@@ -608,9 +654,10 @@ pub(crate) mod tests {
             assert_eq!(row.site, recorded.manifest.site);
             assert_eq!(row.feed, recorded.manifest.feed);
         }
-        // And nothing in any other grain: the runner writes only this table.
+        // And nothing in any other grain: the runner writes only these two
+        // tables.
         for grain in Grain::ALL {
-            if grain != Grain::ConformanceFinding {
+            if grain != Grain::ConformanceFinding && grain != Grain::ConformanceJudged {
                 assert!(!sink.path(grain).exists(), "{grain} was written");
             }
         }

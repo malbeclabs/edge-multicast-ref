@@ -101,6 +101,11 @@ fn provenance(rows: &RowBatch, grain: Grain) -> Vec<Derivation> {
             .iter()
             .map(|r| r.derivation)
             .collect(),
+        Grain::ConformanceJudged => rows
+            .conformance_judged
+            .iter()
+            .map(|r| r.derivation)
+            .collect(),
         Grain::Event => rows.event.iter().map(|r| r.derivation).collect(),
         Grain::Instrument => rows.instrument.iter().map(|r| r.derivation).collect(),
         Grain::BookTop => rows.book_top.iter().map(|r| r.derivation).collect(),
@@ -118,8 +123,9 @@ fn provenance(rows: &RowBatch, grain: Grain) -> Vec<Derivation> {
 ///
 /// Three fixtures, because no one of them populates every grain: a clean
 /// segment has no gap row, and a segment with a gap has one era.
-/// `conformance_finding` is absent from all three by design — no runner ran —
-/// and the count below is what stops this test passing on empty vectors.
+/// `conformance_finding` and `conformance_judged` are absent from all three by
+/// design — no runner ran — and the count below is what stops this test passing
+/// on empty vectors.
 #[test]
 fn every_row_derived_from_an_object_says_it_came_from_one() {
     let mut populated: BTreeSet<Grain> = BTreeSet::new();
@@ -214,6 +220,9 @@ fn the_same_object_derived_as_a_live_window_differs_only_in_provenance() {
             row.derivation = Derivation::Archive;
         }
         for row in &mut normalised.conformance_finding {
+            row.derivation = Derivation::Archive;
+        }
+        for row in &mut normalised.conformance_judged {
             row.derivation = Derivation::Archive;
         }
         assert_eq!(
@@ -651,6 +660,8 @@ fn nothing_here_judges_conformance() {
     let rows = record(&SyntheticPublisher::clean(STREAM)).rows().rows;
     assert!(rows.conformance_finding.is_empty());
     assert_eq!(rows.rows(Grain::ConformanceFinding), 0);
+    // Nor a coverage row, which would say the object was judged.
+    assert!(rows.conformance_judged.is_empty());
     assert_eq!(rows.rows(Grain::Datagram), STREAM);
     assert_eq!(rows.len(), rows.datagram.len() + rows.era.len() + 1);
 }

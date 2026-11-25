@@ -122,6 +122,16 @@ impl EvidenceRange {
 pub struct RuleOutcome {
     pub rule_id: String,
     pub outcome: Outcome,
+    /// The severity the rule set states for the rule — `must`, `should` or
+    /// `info` — as the report spells it, and carried through unjudged.
+    ///
+    /// A string and not an enum, unlike [`Outcome`]: an outcome this runner
+    /// does not know is a verdict it cannot place, but a severity it does not
+    /// know is still a verdict, and refusing the report over it would leave the
+    /// object unjudged for a label. Absent in a report that does not state it,
+    /// which parses as before.
+    #[serde(default)]
+    pub severity: Option<String>,
     /// Absent where the rule set named no instance. Refused above rather than
     /// filed under a guess.
     #[serde(default)]

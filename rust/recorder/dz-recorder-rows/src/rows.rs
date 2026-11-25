@@ -492,11 +492,25 @@ pub struct ConformanceFinding {
     /// When the rule set ran, not when the traffic passed.
     pub run_ts: Nanos,
     pub rule_id: String,
+    /// The severity the rule set states for the entry the row speaks for —
+    /// `must`, `should` or `info` — lower-cased, as the report spells it.
+    ///
+    /// Carried rather than looked up, so a reader needs no copy of the rule
+    /// set's catalog, which goes stale the first time a rule changes. Empty
+    /// where the report stated none, and a reader takes empty as unknown,
+    /// never as `info`. In no sort key: a rule's severity is a property of the
+    /// rule set version, which is already in the key.
+    pub severity: String,
     pub rule_set_version: String,
     pub site: String,
     pub recorder: String,
     pub env: String,
     pub feed: String,
+    /// The multicast group the manifest joined for this row's port role and
+    /// destination port, which is what a subscriber joins and what a reader
+    /// keys a feed on. `0.0.0.0` where the manifest names no one group for that
+    /// pair, which a reader must not resolve by guessing. In no sort key.
+    pub group_addr: Ipv4Addr,
     pub port_role: PortRoleLabel,
     pub source_addr: Ipv4Addr,
     pub channel_id: u8,
@@ -510,6 +524,57 @@ pub struct ConformanceFinding {
     /// The evidence range.
     pub first_seq: u64,
     pub last_seq: u64,
+}
+
+/// One judged object's coverage over one channel instance, written whatever
+/// verdicts the runner keeps.
+///
+/// `conformance_finding` holds only violations by default, so an object with no
+/// finding row there was either judged clean or never judged, and only the
+/// runner's own ledger could tell the two apart. This row is what a reader
+/// tells them apart by: an object with one was judged, by the
+/// `rule_set_version` on it, and its counts are how much of it was graded.
+///
+/// The counts are the finding rows that keeping every verdict would have
+/// written for the instance, one per rule after the reduction, so `pass +
+/// violation + unverifiable + na` is the number of rules that reached it. Zero
+/// violations over a row with passes is "nothing found wrong in what was
+/// graded", which is weaker than "conforms", and `na` and `unverifiable` are
+/// here so that a reader can show the difference.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConformanceJudged {
+    /// When the rule set ran, not when the traffic passed.
+    pub run_ts: Nanos,
+    pub rule_set_version: String,
+    pub site: String,
+    pub recorder: String,
+    pub env: String,
+    pub feed: String,
+    /// As on [`ConformanceFinding::group_addr`]. Zero on the row an object that
+    /// placed no verdict writes.
+    pub group_addr: Ipv4Addr,
+    /// `0.0.0.0` at channel grain, as in `conformance_finding`.
+    pub source_addr: Ipv4Addr,
+    pub channel_id: u8,
+    pub dst_port: u16,
+    pub window_start: Nanos,
+    pub window_end: Nanos,
+    pub object_key: String,
+    pub derivation: Derivation,
+    pub pass: u32,
+    pub violation: u32,
+    pub unverifiable: u32,
+    pub na: u32,
+    /// `violation`, split by the severity each finding row states. A severity
+    /// the runner does not know counts in `violation` and in none of these, so
+    /// the split can be checked against the total.
+    pub violation_must: u32,
+    pub violation_should: u32,
+    pub violation_info: u32,
+    /// The verdicts the runner declined to place in this run, on the object's
+    /// first row and zero on the rest: they belong to no one instance, and
+    /// they are counted beside the coverage they reduce.
+    pub refused: u32,
 }
 
 /// The message a market data row was decoded from, as the column holds it.
@@ -965,18 +1030,20 @@ pub enum Grain {
     SegmentCoverage,
     SequenceGap,
     ConformanceFinding,
+    ConformanceJudged,
     Event,
     Instrument,
     BookTop,
 }
 
 impl Grain {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Datagram,
         Self::Era,
         Self::SegmentCoverage,
         Self::SequenceGap,
         Self::ConformanceFinding,
+        Self::ConformanceJudged,
         Self::Event,
         Self::Instrument,
         Self::BookTop,
@@ -993,6 +1060,7 @@ impl Grain {
             Self::SegmentCoverage => "segment_coverage",
             Self::SequenceGap => "sequence_gap",
             Self::ConformanceFinding => "conformance_finding",
+            Self::ConformanceJudged => "conformance_judged",
             Self::Event => "event",
             Self::Instrument => "instrument",
             Self::BookTop => "book_top",
@@ -1006,9 +1074,10 @@ impl Grain {
             Self::SegmentCoverage => 2,
             Self::SequenceGap => 3,
             Self::ConformanceFinding => 4,
-            Self::Event => 5,
-            Self::Instrument => 6,
-            Self::BookTop => 7,
+            Self::ConformanceJudged => 5,
+            Self::Event => 6,
+            Self::Instrument => 7,
+            Self::BookTop => 8,
         }
     }
 }
@@ -1037,6 +1106,7 @@ pub struct RowBatch {
     pub segment_coverage: Vec<SegmentCoverage>,
     pub sequence_gap: Vec<SequenceGap>,
     pub conformance_finding: Vec<ConformanceFinding>,
+    pub conformance_judged: Vec<ConformanceJudged>,
     pub event: Vec<Event>,
     pub instrument: Vec<Instrument>,
     pub book_top: Vec<BookTop>,
@@ -1051,6 +1121,7 @@ impl RowBatch {
             Grain::SegmentCoverage => self.segment_coverage.len(),
             Grain::SequenceGap => self.sequence_gap.len(),
             Grain::ConformanceFinding => self.conformance_finding.len(),
+            Grain::ConformanceJudged => self.conformance_judged.len(),
             Grain::Event => self.event.len(),
             Grain::Instrument => self.instrument.len(),
             Grain::BookTop => self.book_top.len(),

@@ -28,6 +28,10 @@ const BOOK_KEY: &str = include_str!("../db/clickhouse/010_recorder_book_key.sql"
 const EVENT_BOOK_DEPTH: &str = include_str!("../db/clickhouse/011_recorder_event_book_depth.sql");
 const READER_GRANTS: &str = include_str!("../db/clickhouse/012_recorder_reader_grants.sql");
 const BOOK_TOP_FEED: &str = include_str!("../db/clickhouse/013_recorder_book_top_feed.sql");
+const CONFORMANCE_SEVERITY: &str =
+    include_str!("../db/clickhouse/014_recorder_conformance_severity.sql");
+const CONFORMANCE_JUDGED: &str =
+    include_str!("../db/clickhouse/015_recorder_conformance_judged.sql");
 
 /// Every migration, in the order they are applied.
 ///
@@ -36,7 +40,7 @@ const BOOK_TOP_FEED: &str = include_str!("../db/clickhouse/013_recorder_book_top
 /// rather than by anything that loads rows. A loader that could grant itself
 /// privileges is the thing it exists to prevent.
 #[must_use]
-pub const fn migrations() -> [Migration; 13] {
+pub const fn migrations() -> [Migration; 15] {
     [
         Migration {
             name: "001_recorder_rows.sql",
@@ -89,6 +93,14 @@ pub const fn migrations() -> [Migration; 13] {
         Migration {
             name: "013_recorder_book_top_feed.sql",
             sql: BOOK_TOP_FEED,
+        },
+        Migration {
+            name: "014_recorder_conformance_severity.sql",
+            sql: CONFORMANCE_SEVERITY,
+        },
+        Migration {
+            name: "015_recorder_conformance_judged.sql",
+            sql: CONFORMANCE_JUDGED,
         },
     ]
 }

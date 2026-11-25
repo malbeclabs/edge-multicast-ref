@@ -381,11 +381,22 @@ ORDER BY (source_addr, channel_id, dst_port, era_anchor_ts, missing_from, site);
 CREATE TABLE IF NOT EXISTS recorder.conformance_finding (
     run_ts           DateTime64(9),       -- when the rule set ran
     rule_id          LowCardinality(String),
+    -- The stated severity of the entry the row speaks for, `must`, `should` or
+    -- `info`, lower-cased; '' where the report stated none, which a reader takes
+    -- as unknown and never as `info`. In no sort key: a rule's severity is a
+    -- property of the rule set version, which is already in it. See 014, which
+    -- adds this and `group_addr` to a deployment that applied this file before
+    -- either existed.
+    severity         LowCardinality(String) DEFAULT '',
     rule_set_version LowCardinality(String),
     site             LowCardinality(String),
     recorder         LowCardinality(String),
     env              LowCardinality(String),
     feed             LowCardinality(String),
+    -- The group the manifest joined for the row's port role and destination
+    -- port, and 0.0.0.0 where it names no one group for that pair. In no sort
+    -- key.
+    group_addr       IPv4 DEFAULT toIPv4('0.0.0.0'),
     port_role        LowCardinality(String),
     source_addr      IPv4,
     channel_id       UInt8,
