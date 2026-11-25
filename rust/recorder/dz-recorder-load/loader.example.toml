@@ -78,6 +78,13 @@ poll_interval = 30
 # 0 is no bound.
 max_objects_per_pass = 60
 
+# Objects one pass will judge, where any [[conformance]] feed is named. Absent is
+# max_objects_per_pass; 0 is no bound. Its own number because the load and the
+# judging take turns in one loop, and every object judged delays the next load
+# by the seconds the rule set takes over it: a host whose load needs most of its
+# bound to keep up gives the judging less, or its load falls behind.
+# conformance_max_objects_per_pass = 10
+
 # MARKET DATA DERIVATION IS OFF, AND IT IS OFF BY THE ABSENCE OF THIS SECTION.
 #
 # A feed with no entry here is loaded exactly as everything is loaded today:

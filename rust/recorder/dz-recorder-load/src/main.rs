@@ -461,7 +461,7 @@ fn drive<S: RowSink, C: RowSink>(
                 objects_dir: &config.loader.objects_dir,
                 site: &config.loader.site,
                 recorder: &config.loader.recorder,
-                max_objects: config.loader.max_objects_per_pass,
+                max_objects: config.loader.conformance_max_objects(),
                 feeds: &c.feeds,
                 scratch: &c.scratch,
                 ledger: &mut c.ledger,
@@ -479,11 +479,12 @@ fn drive<S: RowSink, C: RowSink>(
                 first_failure = errors.first().cloned();
             }
             eprintln!(
-                "dz-recorder-load: conformance: judged {} object(s), recorded {}, failed {}; \
-                 {} unjudged of which {} held by the sink, oldest {}s behind",
+                "dz-recorder-load: conformance: judged {} object(s), recorded {}, failed {}, \
+                 vanished {}; {} unjudged of which {} held by the sink, oldest {}s behind",
                 judged.judged,
                 judged.recorded,
                 judged.failed,
+                judged.vanished,
                 judged.unjudged,
                 judged.held,
                 judged.oldest_unjudged_age_seconds
