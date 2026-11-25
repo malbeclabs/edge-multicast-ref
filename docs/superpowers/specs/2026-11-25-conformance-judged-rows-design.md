@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS recorder.conformance_judged (
     window_start     DateTime64(9),
     window_end       DateTime64(9),
     object_key       String,
+    derivation       LowCardinality(String) DEFAULT 'archive',
     pass             UInt32,
     violation        UInt32,
     unverifiable     UInt32,
@@ -99,6 +100,8 @@ ORDER BY (feed, group_addr, source_addr, channel_id, dst_port, window_start, sit
 - **No TTL**, as for `conformance_finding`, and for the same reason. The rows
   are a few per object, not one per rule.
 - **Identity and window are the manifest's**, as in `finding_rows`.
+- **`derivation`** is always `archive`, and in no sort key, because every grain
+  carries its provenance (`provenance_is_on_every_grain_and_in_no_sort_key`).
 
 ### 2. `severity` and `group_addr` on `conformance_finding`
 
@@ -116,16 +119,20 @@ ALTER TABLE recorder.conformance_finding
 - `group_addr` is the group the manifest joined for the row's port role and
   destination port, the same lookup `segment_coverage.roles_joined` records.
   It is `0.0.0.0` where the manifest names no group for that pair, which a
-  reader must not resolve by guessing. It is in no sort key.
+  reader must not resolve by guessing. A port joined in more than one group
+  for the same role is `0.0.0.0` too, for the same reason. It is in no sort
+  key.
 
 `RuleOutcome` gains `severity: Option<String>`, with `#[serde(default)]`. A
 report that does not state it parses as before and writes `''`.
 
 ### 3. Grants
 
-`015` grants `INSERT ON recorder.conformance_judged TO dz_loader`, at table
-level, as `004` does for the other grains. A reader's `SELECT` grant is the
-reader's deployment's business, as in `012`.
+`004` gains `GRANT INSERT ON recorder.conformance_judged TO dz_loader`, at table
+level, as for the other grains. It goes in `004` and not in `015` because the
+schema files hold no grants (`the_access_management_list_matches_the_files_that_grant`).
+So `015` says to re-apply `004` after it, as `009` does. A reader's `SELECT`
+grant is the reader's deployment's business, as in `012`.
 
 ## Ordering, because the sink refuses unknown columns
 
@@ -136,7 +143,9 @@ reversible, but it is a stalled runner. So:
 
 1. Apply `014_recorder_conformance_severity.sql` and
    `015_recorder_conformance_judged.sql`.
-2. Roll out the loader that writes them.
+2. Re-apply `004_recorder_loader_user.sql`, for the new grant. Without it every
+   judged batch is refused for privilege, which is the same stall.
+3. Roll out the loader that writes them (0.8.0).
 
 A host that judges no feed writes neither table, and is unaffected either way.
 
