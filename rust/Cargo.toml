@@ -4,6 +4,7 @@ members = [
     "codec/dz-edge-core",
     "codec/dz-edge-tob",
     "codec/dz-edge-mbp",
+    "codec/dz-edge-midpoint",
     "codec/dz-edge-refdata",
     "adapter/dz-adapter-core",
     "adapter/dz-adapter-uds",

@@ -31,8 +31,16 @@ pub enum EncodeError {
     ///
     /// Recoverable, like the others: the send path counts it and drops the
     /// message rather than aborting, because a publisher that panics goes dark.
-    #[error("the {feed} feed does not carry message type {type_id:#04x}")]
-    NotCarriedByFeed { feed: &'static str, type_id: u8 },
+    ///
+    /// Also returned for a feed-local message pushed into another feed that
+    /// uses the same Type ID for a different message, which is why it names
+    /// the message and not only the Type ID.
+    #[error("the {feed} feed does not carry {message} (type {type_id:#04x})")]
+    NotCarriedByFeed {
+        feed: &'static str,
+        message: &'static str,
+        type_id: u8,
+    },
 
     /// The message's fields are individually representable and their
     /// combination is one its own specification forbids.

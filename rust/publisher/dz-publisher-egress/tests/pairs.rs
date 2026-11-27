@@ -32,6 +32,7 @@ impl AppMessage for Definition {
     const TYPE_ID: u8 = TYPE_DEFINITION;
     const SIZE: usize = DEFINITION;
     const PORT_ROLES: &'static [PortRole] = &[PortRole::Refdata];
+    const FEED_LOCAL: Option<u16> = None;
     fn encode_into(&self, dst: &mut [u8]) {
         dst.fill(0);
     }
@@ -46,6 +47,7 @@ impl AppMessage for Strike {
     const TYPE_ID: u8 = TYPE_STRIKE;
     const SIZE: usize = STRIKE;
     const PORT_ROLES: &'static [PortRole] = &[PortRole::Refdata];
+    const FEED_LOCAL: Option<u16> = None;
     fn validate(&self) -> Result<(), EncodeError> {
         if self.sendable {
             Ok(())

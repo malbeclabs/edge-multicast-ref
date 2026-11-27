@@ -129,6 +129,7 @@ impl AppMessage for Small {
     const TYPE_ID: u8 = 0x11;
     const SIZE: usize = 16;
     const PORT_ROLES: &'static [PortRole] = &[PortRole::Mktdata];
+    const FEED_LOCAL: Option<u16> = None;
     fn encode_into(&self, dst: &mut [u8]) {
         dst.fill(0);
     }
@@ -144,6 +145,7 @@ impl AppMessage for Big {
     const TYPE_ID: u8 = 0x12;
     const SIZE: usize = 255;
     const PORT_ROLES: &'static [PortRole] = &[PortRole::Mktdata];
+    const FEED_LOCAL: Option<u16> = None;
     fn encode_into(&self, dst: &mut [u8]) {
         dst.fill(0);
     }
@@ -156,6 +158,7 @@ impl AppMessage for SnapshotOnly {
     const TYPE_ID: u8 = 0x13;
     const SIZE: usize = 16;
     const PORT_ROLES: &'static [PortRole] = &[PortRole::Snapshot];
+    const FEED_LOCAL: Option<u16> = None;
     fn encode_into(&self, dst: &mut [u8]) {
         dst.fill(0);
     }
@@ -170,6 +173,7 @@ impl AppMessage for Uncarried {
     const TYPE_ID: u8 = 0x15;
     const SIZE: usize = 16;
     const PORT_ROLES: &'static [PortRole] = &[PortRole::Mktdata];
+    const FEED_LOCAL: Option<u16> = None;
     fn encode_into(&self, dst: &mut [u8]) {
         dst.fill(0);
     }
@@ -183,6 +187,7 @@ impl AppMessage for Contradictory {
     const TYPE_ID: u8 = 0x14;
     const SIZE: usize = 16;
     const PORT_ROLES: &'static [PortRole] = &[PortRole::Mktdata];
+    const FEED_LOCAL: Option<u16> = None;
     fn validate(&self) -> Result<(), EncodeError> {
         Err(EncodeError::MalformedMessage {
             message: core::any::type_name::<Self>(),

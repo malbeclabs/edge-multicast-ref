@@ -572,7 +572,8 @@ func TestGoldenManifestStatesWhatTheseCasesAssert(t *testing.T) {
 // merely unbound, and it stays that way until someone counts the files by
 // hand.
 var goldenVectorsReadElsewhere = map[string]string{
-	"quote-v3.bin": "go/topofbook-parser's tob.TestGoldenQuote; market-by-price carries no Quote",
+	"quote-v3.bin":    "go/topofbook-parser's tob.TestGoldenQuote; market-by-price carries no Quote",
+	"midpoint-v3.bin": "rust/codec/dz-edge-midpoint's tests/golden.rs; no Go decoder carries the midpoint feed",
 }
 
 // TestGoldenManifestHasNoVectorNobodyReads holds the corpus to being wholly

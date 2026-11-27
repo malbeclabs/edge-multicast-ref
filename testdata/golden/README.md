@@ -37,6 +37,10 @@ same type id, and its `golden_test.go` binds that decoder to the same bytes.
 Hand-transcribing them from the spec tables would settle the remainder, and is
 worth doing when the spec text is next open.
 
+**`midpoint-v3.bin` was transcribed from the field table in `midpoint/spec.md`
+3.0.0**, not captured from an encoder. `dz-edge-midpoint` asserts it. No Go
+decoder carries the midpoint feed yet, so it is bound in Rust only.
+
 **A codec vector is the message on the wire, not the encoder's output.** The
 three snapshot vectors carry `Flags` bit 0, which the builder stamps at push —
 after the body is encoded — because every message travelling the snapshot port
@@ -73,9 +77,10 @@ about the fixture rather than a value the lowering read.
 Who reads what is worth stating exactly, because a vector no suite reads and no
 document mentions is invisible rather than merely unbound — which is how the
 five `-from-event-` vectors below stayed bound in one language only. Every
-vector in the two tables is read by `go/marketbyprice-parser` except one:
+vector in the two tables is read by `go/marketbyprice-parser` except two:
 `quote-v3.bin`, which that feed has no message type for and which
-`go/topofbook-parser` reads.
+`go/topofbook-parser` reads; and `midpoint-v3.bin`, which
+`rust/codec/dz-edge-midpoint` reads.
 `TestGoldenManifestHasNoVectorNobodyReads` holds
 the corpus to that, so a vector added here and asserted nowhere fails rather
 than sitting unnoticed.
@@ -95,6 +100,7 @@ than sitting unnoticed.
 | `snapshot-begin-v3.bin` | SnapshotBegin | `0x20` | 40 | 3 |
 | `snapshot-level-v3.bin` | SnapshotLevel | `0x42` | 32 | 3 |
 | `snapshot-end-v3.bin` | SnapshotEnd | `0x22` | 20 | 3 |
+| `midpoint-v3.bin` | Midpoint | `0x03` | 48 | 3 |
 
 The five market-by-price vectors are the depth-grain messages — the ones the
 top-of-book feed does not have. Its `Heartbeat`, `Trade` and

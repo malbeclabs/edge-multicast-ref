@@ -250,9 +250,12 @@ impl<F: Feed> DatagramBuilder<F> {
         // valid body or a bigger datagram. The magic would have been right,
         // which is exactly what makes it worth checking here — nothing further
         // down the send path can tell.
-        if !F::carries(M::TYPE_ID) {
+        // A carried Type ID is not enough when it is feed-local: the same byte
+        // is another feed's message too. See `AppMessage::FEED_LOCAL`.
+        if !F::carries(M::TYPE_ID) || M::FEED_LOCAL.is_some_and(|magic| magic != F::MAGIC) {
             return Err(EncodeError::NotCarriedByFeed {
                 feed: F::NAME,
+                message: core::any::type_name::<M>(),
                 type_id: M::TYPE_ID,
             });
         }

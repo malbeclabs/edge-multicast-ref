@@ -23,6 +23,7 @@ tiny_http = { workspace = true }
 # The depth feed's message types are held to their port roles the same way,
 # and that check is the only thing here that reads them.
 dz-edge-mbp = { path = "../../codec/dz-edge-mbp" }
+dz-edge-midpoint = { path = "../../codec/dz-edge-midpoint" }
 dz-edge-refdata = { path = "../../codec/dz-edge-refdata" }
 # The dependency goes this way round and must stay this way round: the adapter
 # boundary mirrors two of the label taxonomies here, and it is this crate that

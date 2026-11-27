@@ -1,5 +1,5 @@
 {
-  "spec_revision": "edge-feed-spec 3a8f19c615aa9270e8581a22d45c6a9e780fee66 (2026-08-23); top-of-book 3.0.1; reference-data 1.0.2; market-by-price 1.0.0. strike-interval-v3.bin: edge-feed-spec 4bf2e03f3b1b883695727bd73300d7a1271e59bd; reference-data 1.1.0",
+  "spec_revision": "edge-feed-spec 3a8f19c615aa9270e8581a22d45c6a9e780fee66 (2026-08-23); top-of-book 3.0.1; reference-data 1.0.2; market-by-price 1.0.0. strike-interval-v3.bin: edge-feed-spec 4bf2e03f3b1b883695727bd73300d7a1271e59bd; reference-data 1.1.0. midpoint-v3.bin: edge-feed-spec f5747721e6ea80d8baf738f978452cb02220fbb5 (malbeclabs/edge-feed-spec#94); midpoint 3.0.0",
   "vectors": [
     {
       "file": "quote-v3.bin",
@@ -371,6 +371,25 @@
         "instrument_id": 1,
         "anchor_seq": 918273645,
         "snapshot_id": 1
+      },
+      "flags_on_wire": 0
+    },
+    {
+      "file": "midpoint-v3.bin",
+      "message": "Midpoint",
+      "type_id": "0x03",
+      "size": 48,
+      "schema_version": 3,
+      "fields": {
+        "instrument_id": 1,
+        "source_id": 2,
+        "method": 5,
+        "quality_flags": 1,
+        "input_timestamp_ns": 1700000000000000000,
+        "compute_timestamp_ns": 1700000000000250000,
+        "price": 10000123,
+        "window_ms": 60000,
+        "volume": 1234500
       },
       "flags_on_wire": 0
     }
