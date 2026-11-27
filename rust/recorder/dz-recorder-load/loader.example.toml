@@ -85,6 +85,12 @@ max_objects_per_pass = 60
 # bound to keep up gives the judging less, or its load falls behind.
 # conformance_max_objects_per_pass = 10
 
+# Whether the next object is derived while the previous one's rows are posted.
+# Off is the serial walk: derive, post, derive. On, the two overlap and an object
+# costs about the longer of them rather than their sum; the rows are the same.
+# The price is one more object's rows in memory while a post is in flight.
+# derive_ahead = true
+
 # MARKET DATA DERIVATION IS OFF, AND IT IS OFF BY THE ABSENCE OF THIS SECTION.
 #
 # A feed with no entry here is loaded exactly as everything is loaded today:

@@ -239,6 +239,29 @@ object loaded whose rows a crash then loses, with nothing recording that it did.
 A `--once` pass and a shutdown both flush, so no run leaves rows in memory the
 ledger will never account for.
 
+### Deriving while the sink posts: `derive_ahead`
+
+**Off, a pass is serial: derive an object, hand it to the sink, derive the
+next.** When the hand-over makes the sink due, the sink posts every held grain
+one after another before it returns, and nothing is derived meanwhile. On a host
+far from the store that is most of each object's time: on 2026-11-25 the
+loader's main thread on the Tokyo recorder ran 34% of the time and waited on its
+inserts for the rest.
+
+`[loader] derive_ahead = true` derives the next object on a thread of its own
+while the current one is handed over, so an object costs about the longer of the
+two rather than their sum. **The rows are the same rows**: the object derived
+ahead is the one the serial walk takes next, under the same signal and the same
+`max_objects_per_pass`, and it is derived against the trailer it would have been
+given, counting the object being handed over as pending. A pass that ends before
+handing it over (a signal, the bound, a sink that lost its rows) waits for it and
+drops it, and the next pass derives it again, so nothing about it is recorded.
+
+The price is one more object's rows in memory while a post is in flight, and one
+more thread. One object ahead and never more, so the price has a bound; a host
+whose pass peak is close to its memory limit needs room for one more of its
+largest objects before it turns this on.
+
 The one query shape worth knowing before it is pointed at a dashboard is
 `recorder.era_ranked`: `era_index` is a dense rank, and a dense rank is defined
 over all history, so no predicate on time can be pushed through it. `era` is

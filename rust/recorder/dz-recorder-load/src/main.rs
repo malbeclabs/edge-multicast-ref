@@ -423,6 +423,7 @@ fn drive<S: RowSink, C: RowSink>(
             metrics,
             market_data: &config.market_data,
             pending: &mut pending,
+            derive_ahead: config.loader.derive_ahead,
         }
         .run_once(&stopping);
 
