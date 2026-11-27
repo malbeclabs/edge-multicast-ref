@@ -583,6 +583,7 @@ mod tests {
             metrics,
             market_data: &[],
             pending: &mut pending,
+            derive_ahead: false,
         }
         .run_once(&|| false);
         assert!(errors.is_empty(), "{errors:?}");

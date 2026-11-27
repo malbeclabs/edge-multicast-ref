@@ -455,6 +455,19 @@ pub struct Loader {
     /// runner's own writable path, never inside `objects_dir`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conformance_scratch: Option<PathBuf>,
+    /// Whether the next object is derived while the previous one's rows are
+    /// posted. Off by default, which is the serial walk every earlier version
+    /// ran.
+    ///
+    /// The rows are the same either way; what it changes is the time and the
+    /// memory. A pass whose posts take most of each object's time -- a host far
+    /// from the store, or an insert set that posts once an object -- takes
+    /// about the longer of the derivation and the post instead of their sum.
+    /// The price is one more object's rows in memory while a post is in flight,
+    /// so a host whose pass peak is near its memory limit should not turn it on
+    /// without room for one more of its largest objects.
+    #[serde(default)]
+    pub derive_ahead: bool,
 }
 
 impl Loader {
@@ -479,6 +492,7 @@ impl Default for Loader {
             conformance_max_objects_per_pass: None,
             conformance_ledger: None,
             conformance_scratch: None,
+            derive_ahead: false,
         }
     }
 }
@@ -778,6 +792,11 @@ impl LoaderConfig {
             let _ = writeln!(out, "feeds={}", feeds.join(" "));
         }
         let _ = writeln!(out, "ledger={}", self.loader.ledger.display());
+        // Printed only when on, like `feeds=`: off is the serial walk every
+        // version before it ran, and the absence of the line says so.
+        if self.loader.derive_ahead {
+            let _ = writeln!(out, "derive_ahead=true");
+        }
         let _ = writeln!(
             out,
             "destination={} database={} user={}",
@@ -1306,6 +1325,33 @@ persist_snapshot_levels = true
         assert!(
             LoaderConfig::parse(&text).is_err(),
             "an unknown value is refused"
+        );
+    }
+
+    /// `derive_ahead` is off unless it is stated, and the summary names it
+    /// only when it is on.
+    #[test]
+    fn deriving_ahead_is_off_unless_stated() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let (_, text) = judging(dir.path(), "");
+        let config = LoaderConfig::parse(&text).expect("parses");
+        assert!(!config.loader.derive_ahead);
+        assert!(
+            !config.summary().contains("derive_ahead"),
+            "{}",
+            config.summary()
+        );
+
+        let text = text.replace(
+            "poll_interval = 30",
+            "poll_interval = 30\nderive_ahead = true",
+        );
+        let config = LoaderConfig::parse(&text).expect("parses");
+        assert!(config.loader.derive_ahead);
+        assert!(
+            config.summary().contains("derive_ahead=true"),
+            "{}",
+            config.summary()
         );
     }
 

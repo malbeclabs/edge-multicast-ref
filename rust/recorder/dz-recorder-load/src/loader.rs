@@ -36,6 +36,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::thread::JoinHandle;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use dz_recorder_archive::SegmentManifest;
@@ -45,7 +46,7 @@ use dz_recorder_rows::{
 
 use crate::config::MarketDataFeed;
 use crate::ledger::{Entry, Ledger};
-use crate::market_data::{derivation_for, derive_market_data, extend_batch, refusals};
+use crate::market_data::{derivation_for, derive_market_data, extend_batch, refusals, RefusalKind};
 use crate::metrics::{ErrorKind, LoaderMetrics, SkipReason};
 
 /// The suffix the recorder writes beside every object.
@@ -140,6 +141,118 @@ pub struct Loader<'a, S: RowSink> {
     /// Carried across passes because the sink is: a quiet feed's rows may be
     /// held for the whole `insert_max_delay`, which is several passes.
     pub pending: &'a mut Vec<Pending>,
+    /// Whether the next object is derived while this one's rows go to the
+    /// sink, on a thread of its own.
+    ///
+    /// **Off, the walk is serial: derive, hand over, derive.** A hand-over that
+    /// makes the sink due posts every held grain one after another, and on a
+    /// host far from the store that is most of an object's time, all of it
+    /// spent with nothing being derived. On, the two overlap, and an object
+    /// takes about the longer of the two rather than their sum.
+    ///
+    /// **The rows are the same rows.** The object derived ahead is the one the
+    /// serial walk would derive next, under the same signal and bound, against
+    /// the trailer it would have been given (see [`Self::trailer`]), and it is
+    /// handed over in the same order. What changes is the cost: one more
+    /// thread, and one more object's rows in memory while the previous one is
+    /// posted. One object ahead and never more, so that cost has a bound.
+    pub derive_ahead: bool,
+}
+
+/// One object derived, and not yet handed to the sink.
+struct Prepared {
+    rows: dz_recorder_rows::RowBatch,
+    trailer: SegmentTrailer,
+    /// What the market data derivation refused, for a feed that derives it.
+    /// Counted when the object is handed over rather than where it was
+    /// derived, so a derivation ahead whose object the pass then does not hand
+    /// over counts nothing, as the serial walk would not have.
+    refused: Option<[(RefusalKind, u64); RefusalKind::ALL.len()]>,
+}
+
+/// Derives one object: its transport rows and, for a feed that is named, its
+/// market data.
+///
+/// A function of its arguments alone, so it can run on a thread of its own
+/// while the sink posts. Every failure is before the sink is touched, which is
+/// what makes it one the held rows survive.
+fn derive(
+    object: &Path,
+    manifest: &SegmentManifest,
+    trailer: Option<&SegmentTrailer>,
+    market_data: Option<&MarketDataFeed>,
+) -> Result<Prepared, Failed> {
+    // The latest trailer, pending or recorded, which the caller chose. Pending
+    // first: within one pass the previous object is still pending when this one
+    // is derived, and consulting only the ledger would write an uncertain
+    // boundary for every object after the first.
+    let mut derived = derive_object(object, manifest, trailer)
+        .map_err(|e| Failed::with_rows_intact(kind_of(&e), e.to_string()))?;
+
+    // And only then, and only for a feed somebody named. The digest has been
+    // verified and the archive has been walked to its end by the call above,
+    // so what this second walk adds is the codec and nothing else.
+    //
+    // A failure here fails the whole object, batch included. Keeping the
+    // datagram rows and dropping the market data would land an object whose
+    // `event` table is empty — which is what a feed nobody published on looks
+    // like, and it would look like that for ever, because the ledger entry
+    // would say the object is loaded.
+    let mut refused = None;
+    if let Some(feed) = market_data {
+        let events = derive_market_data(object, manifest, feed)
+            .map_err(|e| Failed::with_rows_intact(ErrorKind::Replay, e.to_string()))?;
+        refused = Some(refusals(&events));
+        extend_batch(&mut derived.rows, events);
+    }
+    Ok(Prepared {
+        rows: derived.rows,
+        trailer: derived.trailer,
+        refused,
+    })
+}
+
+/// The object being derived ahead, and which one it is.
+struct Ahead {
+    index: usize,
+    manifest: SegmentManifest,
+    /// The trailer it is being derived against, which is checked against the
+    /// one it is owed when its turn comes.
+    trailer: Option<SegmentTrailer>,
+    derivation: JoinHandle<Result<Prepared, Failed>>,
+}
+
+impl Ahead {
+    fn spawn(
+        index: usize,
+        object: PathBuf,
+        manifest: SegmentManifest,
+        trailer: Option<SegmentTrailer>,
+        market_data: Option<MarketDataFeed>,
+    ) -> Self {
+        let for_thread = manifest.clone();
+        let given = trailer.clone();
+        let derivation = std::thread::spawn(move || {
+            derive(&object, &for_thread, given.as_ref(), market_data.as_ref())
+        });
+        Self {
+            index,
+            manifest,
+            trailer,
+            derivation,
+        }
+    }
+}
+
+/// What a derivation ahead came to.
+///
+/// A derivation that panicked panics here, on the loader's own thread, which
+/// is what it would have done had it not run ahead: a panic is a bug, and a
+/// loader that turned it into a counted failure would carry on past it.
+fn joined(derivation: JoinHandle<Result<Prepared, Failed>>) -> Result<Prepared, Failed> {
+    derivation
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 
 /// One object whose rows the sink has taken and not yet posted.
@@ -271,51 +384,99 @@ impl<S: RowSink> Loader<'_, S> {
             derivable,
         } = self.scan(&candidates, &mut pass, &mut errors);
 
-        for index in take_turns(derivable) {
+        let mut schedule = take_turns(derivable).into_iter();
+        // The object being derived while the one before it is handed to the
+        // sink, when `derive_ahead` is on. At most one: see `derive_ahead`.
+        let mut ahead: Option<Ahead> = None;
+        loop {
             // Checked before the object rather than after it: a signal that
             // arrived mid-pass finishes the object it is in and stops, so a
             // restart never leaves one half-loaded. A bound on the pass does the
             // same, so a loader eight hours behind still publishes its lag every
             // poll interval instead of after an unbounded catch-up. Both end
             // only the loading; the scan above is already whole.
-            if stop() {
-                break;
-            }
-            // Against what the pass *derived*, which is the work it did. Loading
-            // is not that number any more: a sink that coalesces lands nothing
-            // until an insert goes, so a bound on `loaded` stays at 0 through a
-            // whole catch-up and bounds nothing — which is the unbounded pass
-            // the key exists to prevent.
-            if self.max_objects != 0 && pass.derived >= self.max_objects as u64 {
+            if stop() || self.bound_reached(pass.derived) {
                 break;
             }
 
-            let candidate = &candidates[index];
-            // Read again, for the reason `derivable` holds no manifest. The
-            // recorder never rewrites a published manifest -- its name is the
-            // segment's own window and sequence -- so this is the same text the
-            // scan read.
-            //
-            // One that is gone was evicted between the two reads, and that is a
-            // skip, not a failure. The gap is the whole scan long, and during a
-            // back-load the objects taken first are a newcomer's oldest, which
-            // are also the ones closest to eviction: counted as a manifest
-            // error, every one of them would page as damage what is the
-            // eviction race the lag metrics already report.
-            let manifest = match read_manifest_if_present(&candidate.manifest_path) {
-                Ok(Some(manifest)) => manifest,
-                Ok(None) => {
-                    self.metrics.object_skipped(SkipReason::Evicted);
-                    pass.skipped += 1;
-                    continue;
+            let (index, manifest, derivation) = if let Some(Ahead {
+                index,
+                manifest,
+                trailer,
+                derivation,
+            }) = ahead.take()
+            {
+                let derived = joined(derivation);
+                // The trailer it was given is the one the serial walk would
+                // give it now, unless the hand-over before it changed what is
+                // pending and recorded some other way: an object that landed
+                // and whose ledger entry could not be written leaves `pending`
+                // with nothing in the ledger behind it. Then it is derived
+                // again, against the trailer it is owed, and the rows are
+                // still the serial walk's.
+                let owed = self.trailer(&manifest.feed, None);
+                if owed == trailer {
+                    (index, manifest, derived)
+                } else {
+                    drop(derived);
+                    let derivation = derive(
+                        &candidates[index].object,
+                        &manifest,
+                        owed.as_ref(),
+                        derivation_for(self.market_data, &manifest.feed),
+                    );
+                    (index, manifest, derivation)
                 }
-                Err(message) => {
-                    self.fail(ErrorKind::Manifest, message, &mut pass, &mut errors);
+            } else {
+                let Some((index, manifest)) =
+                    self.next_manifest(&mut schedule, &candidates, stop, &mut pass, &mut errors)
+                else {
+                    break;
+                };
+                let trailer = self.trailer(&manifest.feed, None);
+                let derivation = derive(
+                    &candidates[index].object,
+                    &manifest,
+                    trailer.as_ref(),
+                    derivation_for(self.market_data, &manifest.feed),
+                );
+                (index, manifest, derivation)
+            };
+            let derived = match derivation {
+                Ok(derived) => derived,
+                Err(failure) => {
+                    // Before the sink was touched, so what it holds is intact.
+                    self.fail(failure.kind, failure.message, &mut pass, &mut errors);
                     continue;
                 }
             };
 
-            match self.load(candidate, &manifest, now_ns) {
+            // The next object starts deriving now, while this one's rows go to
+            // the sink, and only if the pass would have reached it: the same
+            // signal and the same bound, counting this object as derived. Its
+            // trailer is the one it would have been given after this object was
+            // handed over, because this object's is passed in beside what is
+            // pending and recorded -- so its rows are the rows the serial walk
+            // derives.
+            if self.derive_ahead && !stop() && !self.bound_reached(pass.derived + 1) {
+                if let Some((next, next_manifest)) =
+                    self.next_manifest(&mut schedule, &candidates, stop, &mut pass, &mut errors)
+                {
+                    let own = (next_manifest.feed == manifest.feed).then_some(&derived.trailer);
+                    let trailer = self.trailer(&next_manifest.feed, own);
+                    let market_data =
+                        derivation_for(self.market_data, &next_manifest.feed).cloned();
+                    ahead = Some(Ahead::spawn(
+                        next,
+                        candidates[next].object.clone(),
+                        next_manifest,
+                        trailer,
+                        market_data,
+                    ));
+                }
+            }
+
+            match self.hand_over(&candidates[index], &manifest, derived, now_ns) {
                 Ok((recorded, rows)) => {
                     pass.derived += 1;
                     pass.loaded += recorded.recorded;
@@ -351,6 +512,15 @@ impl<S: RowSink> Loader<'_, S> {
                     self.fail(failure.kind, failure.message, &mut pass, &mut errors);
                 }
             }
+        }
+        // An object derived ahead that the pass then did not hand over: a
+        // signal, the bound, or a sink that lost its rows ended the pass first.
+        // Waited for, so no derivation outlives the pass that started it, and
+        // its rows dropped. It is not counted anywhere, because nothing was done
+        // to it that the next pass will not do again: it has no ledger entry and
+        // is not pending, so the next scan schedules it as it would have.
+        if let Some(Ahead { derivation, .. }) = ahead {
+            drop(joined(derivation));
         }
 
         // Once a pass, including a pass that found no new object: a feed quiet
@@ -459,48 +629,75 @@ impl<S: RowSink> Loader<'_, S> {
         (pass, errors)
     }
 
-    /// Derives one object, hands it to the sink, and records whatever that
-    /// caused to land.
+    /// Whether a pass that has derived `derived` objects has reached its bound.
+    ///
+    /// Against what the pass *derived*, which is the work it did. Loading is
+    /// not that number any more: a sink that coalesces lands nothing until an
+    /// insert goes, so a bound on `loaded` stays at 0 through a whole catch-up
+    /// and bounds nothing — which is the unbounded pass the key exists to
+    /// prevent.
+    const fn bound_reached(&self, derived: u64) -> bool {
+        self.max_objects != 0 && derived >= self.max_objects as u64
+    }
+
+    /// The next scheduled object whose manifest can still be read, with it.
+    ///
+    /// `None` as well once `stop` says so, checked before every candidate and
+    /// not only before every object derived: a run of evicted or unreadable
+    /// manifests is no reason to carry on past a signal.
+    ///
+    /// Read again, for the reason `derivable` holds no manifest. The recorder
+    /// never rewrites a published manifest -- its name is the segment's own
+    /// window and sequence -- so this is the same text the scan read.
+    ///
+    /// One that is gone was evicted between the two reads, and that is a skip,
+    /// not a failure. The gap is the whole scan long, and during a back-load
+    /// the objects taken first are a newcomer's oldest, which are also the ones
+    /// closest to eviction: counted as a manifest error, every one of them
+    /// would page as damage what is the eviction race the lag metrics already
+    /// report.
+    fn next_manifest(
+        &self,
+        schedule: &mut impl Iterator<Item = usize>,
+        candidates: &[Candidate],
+        stop: &dyn Fn() -> bool,
+        pass: &mut Pass,
+        errors: &mut Vec<String>,
+    ) -> Option<(usize, SegmentManifest)> {
+        while !stop() {
+            let index = schedule.next()?;
+            match read_manifest_if_present(&candidates[index].manifest_path) {
+                Ok(Some(manifest)) => return Some((index, manifest)),
+                Ok(None) => {
+                    self.metrics.object_skipped(SkipReason::Evicted);
+                    pass.skipped += 1;
+                }
+                Err(message) => self.fail(ErrorKind::Manifest, message, pass, errors),
+            }
+        }
+        None
+    }
+
+    /// Hands one derived object to the sink, and records whatever that caused
+    /// to land.
     ///
     /// The order is the property: nothing is recorded until the insert carrying
     /// its rows has been acknowledged. A sink may take this object's rows and
     /// post nothing, in which case the object joins `pending` and is recorded on
     /// a later pass — or take them and post several objects' worth at once, in
     /// which case all of those are recorded here.
-    fn load(
+    fn hand_over(
         &mut self,
         candidate: &Candidate,
         manifest: &SegmentManifest,
+        derived: Prepared,
         now_ns: u64,
     ) -> Result<(Recorded, Written), Failed> {
         let bytes_read = std::fs::metadata(&candidate.object)
             .map(|m| m.len())
             .unwrap_or(manifest.byte_count);
-
-        // The latest trailer, pending or recorded. Pending first: within one
-        // pass the previous object is still pending when this one is derived,
-        // and consulting only the ledger would write an uncertain boundary for
-        // every object after the first.
-        let trailer = self.trailer(&manifest.feed);
-        // Before the sink is touched, which is what makes this failure one the
-        // held rows survive.
-        let mut derived = derive_object(&candidate.object, manifest, trailer.as_ref())
-            .map_err(|e| Failed::with_rows_intact(kind_of(&e), e.to_string()))?;
-
-        // And only then, and only for a feed somebody named. The digest has been
-        // verified and the archive has been walked to its end by the call above,
-        // so what this second walk adds is the codec and nothing else.
-        //
-        // A failure here fails the whole object, batch included. Keeping the
-        // datagram rows and dropping the market data would land an object whose
-        // `event` table is empty — which is what a feed nobody published on looks
-        // like, and it would look like that for ever, because the ledger entry
-        // would say the object is loaded.
-        if let Some(feed) = derivation_for(self.market_data, &manifest.feed) {
-            let events = derive_market_data(&candidate.object, manifest, feed)
-                .map_err(|e| Failed::with_rows_intact(ErrorKind::Replay, e.to_string()))?;
-            self.metrics.market_data_refused(&refusals(&events));
-            extend_batch(&mut derived.rows, events);
+        if let Some(refused) = &derived.refused {
+            self.metrics.market_data_refused(refused);
         }
 
         let accepted = self
@@ -535,12 +732,19 @@ impl<S: RowSink> Loader<'_, S> {
     /// tie of nothing: a pending trailer is evidence about an object on disk,
     /// which is what the check is about — whether its rows have landed yet is a
     /// different question.
-    fn trailer(&self, feed: &str) -> Option<SegmentTrailer> {
+    ///
+    /// `handing_over` is the trailer of an object of this feed that has been
+    /// derived and is about to be handed to the sink, counted as pending: it
+    /// will be, by the time the object this trailer is for is handed over. It
+    /// is what lets an object be derived ahead against the trailer the serial
+    /// walk would have given it.
+    fn trailer(&self, feed: &str, handing_over: Option<&SegmentTrailer>) -> Option<SegmentTrailer> {
         let pending = self
             .pending
             .iter()
             .filter(|p| p.feed == feed)
             .map(|p| &p.trailer)
+            .chain(handing_over)
             .max_by_key(|t| t.segment_seq);
         match (pending, self.ledger.trailer(feed)) {
             (Some(p), Some(l)) if l.segment_seq > p.segment_seq => Some(l.clone()),
@@ -1260,6 +1464,7 @@ mod pass_tests {
             metrics,
             market_data: &[],
             pending: &mut Vec::new(),
+            derive_ahead: false,
         }
         .run_once(&stop);
         sink.flush(now_unix_nanos()).expect("flush");
@@ -1293,10 +1498,226 @@ mod pass_tests {
             metrics,
             market_data: &[],
             pending: &mut Vec::new(),
+            derive_ahead: false,
         }
         .run_once(&stop);
         sink.flush(now_unix_nanos()).expect("flush");
         result
+    }
+
+    /// One pass over `archive` into `rows`, with every knob a derivation
+    /// ahead could change the outcome of.
+    fn pass_into(
+        archive: &Archive,
+        rows: &Path,
+        ledger: &mut Ledger,
+        max_objects: usize,
+        derive_ahead: bool,
+        stop: &dyn Fn() -> bool,
+    ) -> (Pass, Vec<String>) {
+        let metrics = LoaderMetrics::new(SITE, RECORDER);
+        let mut sink = FileSink::create(rows).expect("the directory is writable");
+        let result = Loader {
+            objects_dir: &archive.completed,
+            feeds: None,
+            site: SITE,
+            recorder: RECORDER,
+            max_objects,
+            ledger,
+            sink: &mut sink,
+            metrics: &metrics,
+            market_data: &[],
+            pending: &mut Vec::new(),
+            derive_ahead,
+        }
+        .run_once(stop);
+        sink.flush(now_unix_nanos()).expect("flush");
+        result
+    }
+
+    /// Every row of every grain under `rows`, sorted, so two runs that wrote
+    /// the same rows in another order compare equal.
+    fn every_row(rows: &Path) -> Vec<(Grain, Vec<String>)> {
+        Grain::ALL
+            .iter()
+            .map(|grain| {
+                let mut lines: Vec<String> =
+                    std::fs::read_to_string(FileSink::path_in(rows, *grain))
+                        .unwrap_or_default()
+                        .lines()
+                        .filter(|l| !l.is_empty())
+                        .map(str::to_owned)
+                        .collect();
+                lines.sort();
+                (*grain, lines)
+            })
+            .collect()
+    }
+
+    /// Passes over `archive` until one derives nothing, each bounded by
+    /// `max_objects`, and every row they wrote.
+    fn load_all(
+        archive: &Archive,
+        max_objects: usize,
+        derive_ahead: bool,
+    ) -> Vec<(Grain, Vec<String>)> {
+        let scratch = tempfile::tempdir().expect("a temporary directory");
+        let rows = scratch.path().join("rows");
+        let mut ledger = Ledger::open(scratch.path().join("ledger.jsonl")).expect("a new ledger");
+        loop {
+            let (pass, errors) = pass_into(
+                archive,
+                &rows,
+                &mut ledger,
+                max_objects,
+                derive_ahead,
+                &never(),
+            );
+            assert!(errors.is_empty(), "{errors:?}");
+            if pass.derived == 0 {
+                break;
+            }
+            if max_objects != 0 {
+                assert!(
+                    pass.derived <= max_objects as u64,
+                    "the bound holds: {pass:?}"
+                );
+            }
+        }
+        every_row(&rows)
+    }
+
+    /// **Deriving ahead writes the rows the serial walk writes**, every grain,
+    /// era boundaries included: one feed, where the object derived ahead needs
+    /// the trailer of the one being handed over, and two feeds taking turns,
+    /// where it needs its own feed's from `pending`. Unbounded, and bounded so
+    /// passes end with an object derived ahead and dropped.
+    #[test]
+    fn deriving_ahead_writes_the_rows_the_serial_walk_writes() {
+        for archive in [archive(5, 30), archive_of_two_feeds(4, 30)] {
+            for max_objects in [0, 1, 2, 3] {
+                let serial = load_all(&archive, max_objects, false);
+                let ahead = load_all(&archive, max_objects, true);
+                assert!(
+                    serial
+                        .iter()
+                        .any(|(grain, rows)| *grain == Grain::Era && !rows.is_empty()),
+                    "the comparison covers era boundaries"
+                );
+                assert_eq!(serial, ahead, "max_objects {max_objects}");
+            }
+        }
+    }
+
+    /// Every row one pass writes over `archive` while every ledger append
+    /// fails, into a sink that lands each object as it is handed over.
+    fn rows_with_a_failing_ledger(
+        archive: &Archive,
+        derive_ahead: bool,
+    ) -> Vec<(Grain, Vec<String>)> {
+        let scratch = tempfile::tempdir().expect("a temporary directory");
+        let rows = scratch.path().join("rows");
+        let path = scratch.path().join("ledger.jsonl");
+        let mut ledger = Ledger::open(&path).expect("a new ledger");
+        // A directory is not a file to append to.
+        std::fs::create_dir(&path).expect("the parent is writable");
+        let (pass, errors) = pass_into(archive, &rows, &mut ledger, 0, derive_ahead, &never());
+        assert_eq!(pass.derived, 4);
+        assert!(errors.iter().any(|e| e.contains("ledger")), "{errors:?}");
+        assert_eq!(ledger.entries(), 0);
+        every_row(&rows)
+    }
+
+    /// **A ledger append that fails after an object landed changes the
+    /// trailer its successor is owed, and deriving ahead follows it.** The
+    /// landed object leaves `pending` with no entry behind it, so the serial
+    /// walk derives the next object of its feed against an older trailer, or
+    /// none. The object derived ahead was given the landed one's, so it is
+    /// derived again rather than handed over.
+    #[test]
+    fn a_failed_ledger_append_deriving_ahead_writes_the_serial_rows() {
+        let archive = archive(4, 30);
+        assert_eq!(
+            rows_with_a_failing_ledger(&archive, false),
+            rows_with_a_failing_ledger(&archive, true)
+        );
+    }
+
+    /// **A signal stops the pass between unreadable manifests too**, and not
+    /// only before an object it derives: a run of them is no reason to walk
+    /// the rest of the backlog and derive one more object after shutdown was
+    /// asked for. Serially and deriving ahead.
+    #[test]
+    fn a_signal_is_heard_between_unreadable_manifests() {
+        for derive_ahead in [false, true] {
+            let archive = archive(3, 30);
+            let mut manifests: Vec<PathBuf> = std::fs::read_dir(&archive.completed)
+                .expect("the directory")
+                .map(|e| e.expect("an entry").path())
+                .filter(|p| p.to_string_lossy().ends_with(MANIFEST_SUFFIX))
+                .collect();
+            manifests.sort();
+            let scratch = tempfile::tempdir().expect("a temporary directory");
+            let rows = scratch.path().join("rows");
+            let mut ledger =
+                Ledger::open(scratch.path().join("ledger.jsonl")).expect("a new ledger");
+            // Readable for the scan, and damaged before the load reads it again.
+            let first = manifests[0].clone();
+            let checks = std::cell::Cell::new(0u32);
+            // The check before the first object passes and damages its
+            // manifest; every check after it is the signal.
+            let stop = || {
+                checks.set(checks.get() + 1);
+                if checks.get() == 1 {
+                    std::fs::write(&first, "{").expect("writable");
+                }
+                checks.get() > 2
+            };
+            let (pass, errors) = pass_into(&archive, &rows, &mut ledger, 0, derive_ahead, &stop);
+            assert_eq!(
+                errors.len(),
+                1,
+                "the damaged manifest, and only it: {errors:?}"
+            );
+            assert_eq!(pass.failed, 1);
+            assert_eq!(
+                pass.derived, 0,
+                "nothing derived after the signal: {derive_ahead}"
+            );
+        }
+    }
+
+    /// A signal between objects ends the pass with the object derived ahead
+    /// not handed over, and the next pass takes it up with its boundary
+    /// settled, as the serial walk does.
+    #[test]
+    fn a_stop_deriving_ahead_leaves_the_next_object_to_the_next_pass() {
+        let archive = archive(4, 30);
+        let scratch = tempfile::tempdir().expect("a temporary directory");
+        let rows = scratch.path().join("rows");
+        let mut ledger = Ledger::open(scratch.path().join("ledger.jsonl")).expect("a new ledger");
+        let checks = std::cell::Cell::new(0u32);
+        // False through the first object and the start of the one derived
+        // ahead of it -- the check before the object, the one reading its
+        // manifest, the one before deriving ahead and the one reading that
+        // object's manifest -- and true from the next check on, which is the
+        // one before the object derived ahead would be handed over.
+        let stop = || {
+            checks.set(checks.get() + 1);
+            checks.get() > 4
+        };
+        let (first, errors) = pass_into(&archive, &rows, &mut ledger, 0, true, &stop);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(
+            first.derived, 1,
+            "one object, and the signal stopped the rest"
+        );
+        assert_eq!(ledger.entries(), 1);
+
+        let (rest, errors) = pass_into(&archive, &rows, &mut ledger, 0, true, &never());
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(rest.derived, 3);
+        assert_eq!(every_row(&rows), load_all(&archive, 0, false));
     }
 
     fn feed_set(names: &[&str]) -> HashSet<String> {
@@ -1604,6 +2025,7 @@ mod pass_tests {
             metrics: &metrics,
             market_data: &[],
             pending: &mut Vec::new(),
+            derive_ahead: false,
         }
         .run_once(&stop);
 
@@ -1688,6 +2110,7 @@ mod pass_tests {
             metrics: &metrics,
             market_data: &[],
             pending: &mut Vec::new(),
+            derive_ahead: false,
         }
         .run_once(&stop);
 
@@ -1740,6 +2163,7 @@ mod pass_tests {
                 metrics: &metrics,
                 market_data: &[],
                 pending: &mut Vec::new(),
+                derive_ahead: false,
             }
             .run_once(&stop)
         };
@@ -1822,6 +2246,7 @@ mod pass_tests {
             metrics: &metrics,
             market_data: &[],
             pending: &mut Vec::new(),
+            derive_ahead: false,
         };
         let mut errors = Vec::new();
         let (candidates, _, _) = loader.candidates(&mut errors);
@@ -1892,6 +2317,7 @@ mod pass_tests {
             metrics: &metrics,
             market_data: &[],
             pending: &mut Vec::new(),
+            derive_ahead: false,
         }
         .run_once(&stop);
 
@@ -2052,6 +2478,7 @@ mod pass_tests {
             metrics: &metrics,
             market_data: &[],
             pending: &mut Vec::new(),
+            derive_ahead: false,
         }
         .run_once(&stop);
 
@@ -2095,6 +2522,7 @@ mod pass_tests {
             metrics: &metrics,
             market_data: &[],
             pending: &mut Vec::new(),
+            derive_ahead: false,
         }
         .run_once(&stop);
 
@@ -2122,6 +2550,7 @@ mod pass_tests {
             metrics: &metrics,
             market_data: &[],
             pending: &mut Vec::new(),
+            derive_ahead: false,
         };
         let mut errors = Vec::new();
         let (candidates, _, _) = loader.candidates(&mut errors);
@@ -2185,6 +2614,7 @@ mod pass_tests {
             metrics: &metrics,
             market_data: &[],
             pending: &mut Vec::new(),
+            derive_ahead: false,
         };
         let mut errors = Vec::new();
         let (candidates, _, _) = loader.candidates(&mut errors);
@@ -2351,6 +2781,7 @@ mod deferred_ledger_tests {
             metrics: &metrics,
             market_data: &[],
             pending: &mut pending,
+            derive_ahead: false,
         }
         .run_once(&|| false);
 
@@ -2388,6 +2819,7 @@ mod deferred_ledger_tests {
                 metrics: &metrics,
                 market_data: &[],
                 pending,
+                derive_ahead: false,
             }
             .run_once(&|| false)
             .0
@@ -2450,6 +2882,7 @@ mod deferred_ledger_tests {
             metrics: &metrics,
             market_data: &[],
             pending: &mut pending,
+            derive_ahead: false,
         }
         .run_once(&|| false);
         assert!(errors.is_empty());
@@ -2474,6 +2907,7 @@ mod deferred_ledger_tests {
             metrics: &metrics,
             market_data: &[],
             pending: &mut pending,
+            derive_ahead: false,
         }
         .run_once(&|| false);
         assert_eq!(second.derived, 2, "both are derived again");
@@ -2510,6 +2944,7 @@ mod deferred_ledger_tests {
                 metrics: &metrics,
                 market_data: &[],
                 pending,
+                derive_ahead: false,
             }
             .run_once(&|| false)
             .0
@@ -2591,6 +3026,7 @@ mod deferred_ledger_tests {
             metrics: &metrics,
             market_data: &[],
             pending: &mut pending,
+            derive_ahead: false,
         }
         .run_once(&|| false);
 
@@ -2629,6 +3065,7 @@ mod deferred_ledger_tests {
     fn a_held_predecessor_then_a_refused_write(
         archive: &Archive,
         refused_feed: &str,
+        derive_ahead: bool,
     ) -> (HoldingSink, Ledger) {
         let refused = format!("feed={refused_feed}/");
         let metrics = LoaderMetrics::new(SITE, RECORDER);
@@ -2650,6 +3087,7 @@ mod deferred_ledger_tests {
                 metrics: &metrics,
                 market_data: &[],
                 pending,
+                derive_ahead,
             }
             .run_once(&|| false)
         };
@@ -2703,7 +3141,7 @@ mod deferred_ledger_tests {
     #[test]
     fn a_refused_write_does_not_let_a_held_objects_successor_land_unsettled() {
         let archive = archive_of_two_feeds(3, 40);
-        let (sink, ledger) = a_held_predecessor_then_a_refused_write(&archive, SECOND_FEED);
+        let (sink, ledger) = a_held_predecessor_then_a_refused_write(&archive, SECOND_FEED, false);
 
         assert_eq!(ledger.entries(), 6);
         for feed in [FIRST_FEED, SECOND_FEED] {
@@ -2727,7 +3165,8 @@ mod deferred_ledger_tests {
     #[test]
     fn a_refused_write_does_not_let_the_next_object_of_one_feed_land_unsettled() {
         let archive = archive(3, 40);
-        let (sink, ledger) = a_held_predecessor_then_a_refused_write(&archive, "top-of-book");
+        let (sink, ledger) =
+            a_held_predecessor_then_a_refused_write(&archive, "top-of-book", false);
 
         assert_eq!(ledger.entries(), 3);
         let certain: Vec<u8> = last_boundaries(&sink).into_values().collect();
@@ -2736,6 +3175,32 @@ mod deferred_ledger_tests {
             vec![0, 1, 1],
             "only the first boundary is unsettled"
         );
+    }
+
+    /// Both refused-write shapes again, deriving ahead: the object derived
+    /// while the refused one was handed over is dropped with the pass, and
+    /// every boundary but the first still lands settled.
+    #[test]
+    fn a_refused_write_deriving_ahead_leaves_the_same_boundaries() {
+        let two_feeds = archive_of_two_feeds(3, 40);
+        let (sink, ledger) = a_held_predecessor_then_a_refused_write(&two_feeds, SECOND_FEED, true);
+        assert_eq!(ledger.entries(), 6);
+        for feed in [FIRST_FEED, SECOND_FEED] {
+            let prefix = format!("feed={feed}/");
+            let certain: Vec<u8> = last_boundaries(&sink)
+                .into_iter()
+                .filter(|(key, _)| key.starts_with(&prefix))
+                .map(|(_, certain)| certain)
+                .collect();
+            assert_eq!(certain, vec![0, 1, 1], "{feed}");
+        }
+
+        let one_feed = archive(3, 40);
+        let (sink, ledger) =
+            a_held_predecessor_then_a_refused_write(&one_feed, "top-of-book", true);
+        assert_eq!(ledger.entries(), 3);
+        let certain: Vec<u8> = last_boundaries(&sink).into_values().collect();
+        assert_eq!(certain, vec![0, 1, 1]);
     }
 
     /// **`dz_loader_bytes_written_total` moves.**
@@ -2767,6 +3232,7 @@ mod deferred_ledger_tests {
             metrics: &metrics,
             market_data: &[],
             pending: &mut pending,
+            derive_ahead: false,
         }
         .run_once(&|| false);
 
@@ -2816,6 +3282,7 @@ mod deferred_ledger_tests {
             metrics: &metrics,
             market_data: &[],
             pending: &mut pending,
+            derive_ahead: false,
         }
         .run_once(&|| false);
 
@@ -2866,6 +3333,7 @@ mod deferred_ledger_tests {
                 metrics: &metrics,
                 market_data: &[],
                 pending,
+                derive_ahead: false,
             }
             .run_once(&|| false)
         };
@@ -2931,6 +3399,7 @@ mod deferred_ledger_tests {
             metrics: &metrics,
             market_data: &[],
             pending: &mut pending,
+            derive_ahead: false,
         }
         .run_once(&|| false);
         RowSink::flush(&mut sink, 0).expect("flush");
@@ -2986,6 +3455,7 @@ mod deferred_ledger_tests {
             metrics: &metrics,
             market_data: &[],
             pending: &mut pending,
+            derive_ahead: false,
         }
         .run_once(&|| false);
 
@@ -3311,6 +3781,7 @@ mod market_data_tests {
             metrics,
             market_data,
             pending: &mut Vec::new(),
+            derive_ahead: false,
         }
         .run_once(&stop);
         sink.flush(now_unix_nanos()).expect("flush");
@@ -3517,6 +3988,7 @@ mod market_data_tests {
             metrics: &metrics,
             market_data: &[],
             pending: &mut Vec::new(),
+            derive_ahead: false,
         }
         .run_once(&stopped);
         assert_eq!(off.unloaded, 1, "the load is behind");
@@ -3538,6 +4010,7 @@ mod market_data_tests {
             metrics: &metrics,
             market_data: &derives(false),
             pending: &mut Vec::new(),
+            derive_ahead: false,
         }
         .run_once(&stopped);
         assert_eq!(on.unloaded, 1);
