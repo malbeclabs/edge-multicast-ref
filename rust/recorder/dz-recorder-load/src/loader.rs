@@ -216,6 +216,9 @@ fn derive(
 struct Ahead {
     index: usize,
     manifest: SegmentManifest,
+    /// The trailer it is being derived against, which is checked against the
+    /// one it is owed when its turn comes.
+    trailer: Option<SegmentTrailer>,
     derivation: JoinHandle<Result<Prepared, Failed>>,
 }
 
@@ -228,12 +231,14 @@ impl Ahead {
         market_data: Option<MarketDataFeed>,
     ) -> Self {
         let for_thread = manifest.clone();
+        let given = trailer.clone();
         let derivation = std::thread::spawn(move || {
-            derive(&object, &for_thread, trailer.as_ref(), market_data.as_ref())
+            derive(&object, &for_thread, given.as_ref(), market_data.as_ref())
         });
         Self {
             index,
             manifest,
+            trailer,
             derivation,
         }
     }
@@ -397,13 +402,34 @@ impl<S: RowSink> Loader<'_, S> {
             let (index, manifest, derivation) = if let Some(Ahead {
                 index,
                 manifest,
+                trailer,
                 derivation,
             }) = ahead.take()
             {
-                (index, manifest, joined(derivation))
+                let derived = joined(derivation);
+                // The trailer it was given is the one the serial walk would
+                // give it now, unless the hand-over before it changed what is
+                // pending and recorded some other way: an object that landed
+                // and whose ledger entry could not be written leaves `pending`
+                // with nothing in the ledger behind it. Then it is derived
+                // again, against the trailer it is owed, and the rows are
+                // still the serial walk's.
+                let owed = self.trailer(&manifest.feed, None);
+                if owed == trailer {
+                    (index, manifest, derived)
+                } else {
+                    drop(derived);
+                    let derivation = derive(
+                        &candidates[index].object,
+                        &manifest,
+                        owed.as_ref(),
+                        derivation_for(self.market_data, &manifest.feed),
+                    );
+                    (index, manifest, derivation)
+                }
             } else {
                 let Some((index, manifest)) =
-                    self.next_manifest(&mut schedule, &candidates, &mut pass, &mut errors)
+                    self.next_manifest(&mut schedule, &candidates, stop, &mut pass, &mut errors)
                 else {
                     break;
                 };
@@ -434,7 +460,7 @@ impl<S: RowSink> Loader<'_, S> {
             // derives.
             if self.derive_ahead && !stop() && !self.bound_reached(pass.derived + 1) {
                 if let Some((next, next_manifest)) =
-                    self.next_manifest(&mut schedule, &candidates, &mut pass, &mut errors)
+                    self.next_manifest(&mut schedule, &candidates, stop, &mut pass, &mut errors)
                 {
                     let own = (next_manifest.feed == manifest.feed).then_some(&derived.trailer);
                     let trailer = self.trailer(&next_manifest.feed, own);
@@ -616,6 +642,10 @@ impl<S: RowSink> Loader<'_, S> {
 
     /// The next scheduled object whose manifest can still be read, with it.
     ///
+    /// `None` as well once `stop` says so, checked before every candidate and
+    /// not only before every object derived: a run of evicted or unreadable
+    /// manifests is no reason to carry on past a signal.
+    ///
     /// Read again, for the reason `derivable` holds no manifest. The recorder
     /// never rewrites a published manifest -- its name is the segment's own
     /// window and sequence -- so this is the same text the scan read.
@@ -630,10 +660,12 @@ impl<S: RowSink> Loader<'_, S> {
         &self,
         schedule: &mut impl Iterator<Item = usize>,
         candidates: &[Candidate],
+        stop: &dyn Fn() -> bool,
         pass: &mut Pass,
         errors: &mut Vec<String>,
     ) -> Option<(usize, SegmentManifest)> {
-        for index in schedule.by_ref() {
+        while !stop() {
+            let index = schedule.next()?;
             match read_manifest_if_present(&candidates[index].manifest_path) {
                 Ok(Some(manifest)) => return Some((index, manifest)),
                 Ok(None) => {
@@ -1577,6 +1609,84 @@ mod pass_tests {
         }
     }
 
+    /// Every row one pass writes over `archive` while every ledger append
+    /// fails, into a sink that lands each object as it is handed over.
+    fn rows_with_a_failing_ledger(
+        archive: &Archive,
+        derive_ahead: bool,
+    ) -> Vec<(Grain, Vec<String>)> {
+        let scratch = tempfile::tempdir().expect("a temporary directory");
+        let rows = scratch.path().join("rows");
+        let path = scratch.path().join("ledger.jsonl");
+        let mut ledger = Ledger::open(&path).expect("a new ledger");
+        // A directory is not a file to append to.
+        std::fs::create_dir(&path).expect("the parent is writable");
+        let (pass, errors) = pass_into(archive, &rows, &mut ledger, 0, derive_ahead, &never());
+        assert_eq!(pass.derived, 4);
+        assert!(errors.iter().any(|e| e.contains("ledger")), "{errors:?}");
+        assert_eq!(ledger.entries(), 0);
+        every_row(&rows)
+    }
+
+    /// **A ledger append that fails after an object landed changes the
+    /// trailer its successor is owed, and deriving ahead follows it.** The
+    /// landed object leaves `pending` with no entry behind it, so the serial
+    /// walk derives the next object of its feed against an older trailer, or
+    /// none. The object derived ahead was given the landed one's, so it is
+    /// derived again rather than handed over.
+    #[test]
+    fn a_failed_ledger_append_deriving_ahead_writes_the_serial_rows() {
+        let archive = archive(4, 30);
+        assert_eq!(
+            rows_with_a_failing_ledger(&archive, false),
+            rows_with_a_failing_ledger(&archive, true)
+        );
+    }
+
+    /// **A signal stops the pass between unreadable manifests too**, and not
+    /// only before an object it derives: a run of them is no reason to walk
+    /// the rest of the backlog and derive one more object after shutdown was
+    /// asked for. Serially and deriving ahead.
+    #[test]
+    fn a_signal_is_heard_between_unreadable_manifests() {
+        for derive_ahead in [false, true] {
+            let archive = archive(3, 30);
+            let mut manifests: Vec<PathBuf> = std::fs::read_dir(&archive.completed)
+                .expect("the directory")
+                .map(|e| e.expect("an entry").path())
+                .filter(|p| p.to_string_lossy().ends_with(MANIFEST_SUFFIX))
+                .collect();
+            manifests.sort();
+            let scratch = tempfile::tempdir().expect("a temporary directory");
+            let rows = scratch.path().join("rows");
+            let mut ledger =
+                Ledger::open(scratch.path().join("ledger.jsonl")).expect("a new ledger");
+            // Readable for the scan, and damaged before the load reads it again.
+            let first = manifests[0].clone();
+            let checks = std::cell::Cell::new(0u32);
+            // The check before the first object passes and damages its
+            // manifest; every check after it is the signal.
+            let stop = || {
+                checks.set(checks.get() + 1);
+                if checks.get() == 1 {
+                    std::fs::write(&first, "{").expect("writable");
+                }
+                checks.get() > 2
+            };
+            let (pass, errors) = pass_into(&archive, &rows, &mut ledger, 0, derive_ahead, &stop);
+            assert_eq!(
+                errors.len(),
+                1,
+                "the damaged manifest, and only it: {errors:?}"
+            );
+            assert_eq!(pass.failed, 1);
+            assert_eq!(
+                pass.derived, 0,
+                "nothing derived after the signal: {derive_ahead}"
+            );
+        }
+    }
+
     /// A signal between objects ends the pass with the object derived ahead
     /// not handed over, and the next pass takes it up with its boundary
     /// settled, as the serial walk does.
@@ -1587,11 +1697,14 @@ mod pass_tests {
         let rows = scratch.path().join("rows");
         let mut ledger = Ledger::open(scratch.path().join("ledger.jsonl")).expect("a new ledger");
         let checks = std::cell::Cell::new(0u32);
-        // False for the first object's check, then true from the check that
-        // would start the derivation ahead onward.
+        // False through the first object and the start of the one derived
+        // ahead of it -- the check before the object, the one reading its
+        // manifest, the one before deriving ahead and the one reading that
+        // object's manifest -- and true from the next check on, which is the
+        // one before the object derived ahead would be handed over.
         let stop = || {
             checks.set(checks.get() + 1);
-            checks.get() > 1
+            checks.get() > 4
         };
         let (first, errors) = pass_into(&archive, &rows, &mut ledger, 0, true, &stop);
         assert!(errors.is_empty(), "{errors:?}");
